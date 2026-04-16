@@ -1,0 +1,464 @@
+
+🛍️  AI APP STORE
+Comprehensive Build Documentation
+Natural-Language Discovery  ·  Secure One-Click Installation  ·  AI-Driven Automation
+
+Version 1.0  ·  April 2026
+
+Attribute	Detail
+Document Type	Technical Product Documentation
+Purpose	Full reference for engineering, product, and security teams building the AI App Store platform
+Audience	Product Managers, Software Architects, Backend Engineers, Security Engineers, DevOps, UX Designers
+Status	DRAFT — v1.0
+Last Updated	April 2026
+
+
+1. Executive Summary
+
+Imagine typing "install a game of underwater world" and seeing a beautifully curated result card with the game's synopsis, specs, screenshots, and a single Install button — no wizard, no dependency hell, no manual steps.
+
+The AI App Store is a next-generation software distribution platform that fuses large-language-model (LLM) intent parsing, a curated registry of trusted software sources, an automated installation agent, and a polished consumer-grade interface into one cohesive product. Users interact in natural language; the platform does everything else.
+
+This document covers every major dimension of building the platform: vision, system architecture, AI layer design, security model, source registry, installation pipeline, UX, data model, API contracts, monetisation, and a phased delivery roadmap.
+
+Key Value Propositions
+Pillar	User Problem Solved	Our Approach
+Natural Language Discovery	Users do not know exact app names or where to find them	LLM parses free-text intent into structured search queries against federated registries
+Curated Trusted Sources	Risk of downloading from unsafe, unofficial websites	Allow-listed vetted publishers with cryptographic code signing and SBOM verification
+One-Click Install	Multi-step wizards, missing runtimes, manual PATH config	AI installation agent auto-resolves dependencies, configures env, and handles post-install
+Rich App Cards	Sparse, inconsistent app store listings	AI-generated structured listing with specs, screenshots, system requirements, changelog
+Cross-Platform	Separate flows for Windows, macOS, Linux	Unified UX layer with OS-aware install adapters underneath
+
+
+2. Product Vision & Goals
+
+2.1 Vision Statement
+The AI App Store should be the last place a user ever needs to look for software. Whether they describe their need in a sentence ("I want to record my guitar and mix it") or name a specific tool ("install Blender 4.2"), the platform understands, finds the best match from verified sources, shows a professional listing, and handles every step of installation automatically — with one click.
+
+2.2 Core Goals
+•	Zero Friction Discovery — users never need to know technical package names.
+•	Trustworthy Distribution — every package is sourced from an allow-listed, signed, verified publisher.
+•	Hands-Free Installation — the AI agent resolves all dependencies, sets up runtimes, and configures system settings.
+•	Professional Listings — every app card includes detailed specs, screenshots, requirements, reviews, and provenance.
+•	Cross-Platform — Windows 10+, macOS 12+, major Linux distributions.
+•	Extensible Registry — third-party publishers can submit apps through a developer portal with automated vetting.
+
+2.3 Non-Goals (v1)
+•	We do not build or host the applications themselves (we curate and proxy downloads).
+•	We do not support mobile OS (iOS/Android) in v1.
+•	We do not replace enterprise MDM/software-deployment tools (Intune, Jamf).
+
+
+3. System Architecture
+
+The platform is composed of six major layers that communicate through well-defined APIs and event buses.
+
+3.1 High-Level Architecture Overview
+Layer	Component	Responsibility
+Presentation	Desktop App / Web UI	React-based cross-platform shell (Electron or Tauri); renders search, app cards, install progress
+AI Interface	Intent Engine	LLM-powered query understanding, entity extraction, semantic search, result ranking
+Registry	App Registry Service	Federated index of vetted publishers, packages, metadata, versioning, and provenance records
+Security	Trust & Verification Layer	Code signature validation, SBOM checks, malware scanning, publisher allow-list enforcement
+Install	AI Installation Agent	Dependency resolver, runtime provisioner, OS-level install orchestrator, rollback manager
+Platform	Backend API + Data Store	REST/gRPC gateway, PostgreSQL, Redis cache, message queue (Kafka/SQS), telemetry
+
+3.2 Request Flow — "Install Game of Underwater World"
+The following sequence shows exactly what happens from the moment the user types their request to the app launching on their machine:
+
+1.	User types: "install a game of underwater world" into the search bar.
+2.	The Intent Engine (LLM) analyses the text: category=game, theme=underwater, action=install.
+3.	A semantic search is executed against the App Registry (vector search + keyword fallback).
+4.	Top matches (e.g. "Abzû", "Beyond Blue", "Subnautica") are returned with relevance scores.
+5.	Results are enriched with metadata, screenshots, and system-requirement compatibility checks.
+6.	The user sees a structured listing card for each result. They click Install.
+7.	The Trust Layer verifies the package signature, SBOM, and publisher allow-list status.
+8.	The AI Installation Agent resolves dependencies (DirectX, Visual C++ Runtime, etc.).
+9.	The agent downloads the verified binary over HTTPS with checksum validation.
+10.	Silent installation executes; post-install config applies (desktop shortcut, PATH, etc.).
+11.	The user receives a success notification and can launch the game immediately.
+
+Design Principle: At no step does the user manually intervene. Every technical decision — dependency selection, installer flags, runtime version — is resolved by the AI agent.
+
+
+3.3 Component Interaction Diagram (Textual)
+[ User / UI Client ]
+        |  Natural-language query & install signals
+        v
+[ API Gateway ]  ←→  [ Auth Service ]
+        |
+        +──→ [ Intent Engine (LLM + RAG) ]
+        |           |  structured search params
+        |           v
+        +──→ [ App Registry Service ]  ←→  [ Publisher Portal ]
+        |           |  package metadata + download URL
+        |           v
+        +──→ [ Trust & Verification Layer ]  ←→  [ Sigstore / SBOM DB ]
+        |           |  verified package reference
+        |           v
+        +──→ [ AI Installation Agent ]
+                    |  OS-level install commands
+                    v
+              [ Host Operating System ]
+
+
+4. AI & Intelligence Layer
+
+4.1 Intent Engine
+The Intent Engine is the brain of the discovery experience. It transforms ambiguous natural-language user queries into structured, actionable search parameters using a combination of LLM reasoning and a Retrieval-Augmented Generation (RAG) pipeline backed by the app registry.
+
+4.1.1 Intent Classification Pipeline
+•	Stage 1 — Tokenisation & Preprocessing: The raw query is cleaned and passed to the LLM with a structured system prompt.
+•	Stage 2 — Intent Classification: The LLM identifies primary intent (install, search, update, remove, compare) and secondary modifiers (category, genre, platform, version).
+•	Stage 3 — Entity Extraction: Named entities are extracted (app name, developer name, version constraints, OS requirements).
+•	Stage 4 — Structured Query Generation: Output is a JSON object passed to the Registry Search API.
+•	Stage 5 — Semantic Fallback: If direct matches are low, vector embeddings of the query are compared to app description embeddings (cosine similarity via FAISS or pgvector).
+
+4.1.2 LLM System Prompt Design
+The LLM receives a tightly constrained system prompt to minimise hallucinations and enforce JSON output. Key directives include:
+•	Always respond in the specified JSON schema.
+•	If the query is ambiguous, generate multiple candidate search terms.
+•	Map colloquial descriptions ("underwater game") to canonical categories ("Action Adventure → Marine Environment").
+•	Never invent app names not found in the registry context.
+
+Implementation Note: Use Claude Sonnet or GPT-4o for the intent engine. Apply structured outputs / function-calling to guarantee JSON schema adherence. Cache results for common queries (Redis TTL 1hr) to reduce latency and LLM cost.
+
+4.1.3 Result Enrichment
+After raw registry matches are returned, a second LLM call enriches the result card by:
+•	Writing a 2-3 sentence natural language summary tailored to the user's original query context.
+•	Highlighting which aspects of the app match the user's described need.
+•	Surfacing relevant comparison points if multiple matches exist.
+
+4.2 AI Installation Agent
+The AI Installation Agent is an autonomous agentic system responsible for executing the full installation lifecycle without user intervention. It is built on a ReAct (Reasoning + Acting) loop pattern, enabling it to observe system state, plan actions, execute them, and recover from errors.
+
+4.2.1 Agent Capabilities
+Capability	Description
+Dependency Resolution	Identifies required runtimes (Visual C++, .NET, Java, DirectX) and installs missing ones in the correct order
+Silent Installation	Invokes native installers (MSI, NSIS, PKG, DEB/RPM, AppImage) with appropriate silent flags
+Environment Configuration	Sets PATH variables, registry keys, and plist entries as required by the application
+Post-install Validation	Launches the application in headless mode or inspects registry to confirm successful installation
+Conflict Detection	Identifies version conflicts with existing installed software and proposes resolutions
+Rollback	If installation fails partway, cleanly uninstalls partial artifacts and restores prior state
+Progress Reporting	Streams real-time progress events via WebSocket to the UI layer
+
+4.2.2 Agent Architecture Pattern
+The agent follows a multi-step ReAct pattern:
+12.	Observe — query system state: OS version, installed runtimes, disk space, user permissions.
+13.	Plan — build an ordered action list from the installation manifest.
+14.	Act — execute each action (download, verify checksum, run installer, configure).
+15.	Observe — after each action, verify the expected state change occurred.
+16.	Reflect — if an action failed, re-plan with an alternative approach before giving up.
+
+4.2.3 Framework & Technology
+•	Primary framework: LangGraph (Python) or AutoGen — for stateful multi-step agentic workflows.
+•	Tool definitions: Download file, verify SHA-256, run silent installer, set env var, check if process started, rollback.
+•	LLM backbone: Claude Sonnet or GPT-4o with function calling.
+•	Sandbox: Each installation runs inside an isolated job context with limited OS permissions.
+•	Communication: Publishes progress events to a Redis Pub/Sub channel consumed by the UI.
+
+
+5. App Registry & Trusted Source Model
+
+5.1 Registry Design Philosophy
+The registry is modelled on best practices from proven package managers — APT (Debian/Ubuntu), Homebrew (macOS), and WinGet (Windows) — but adds an AI-powered discovery layer and stricter security vetting. Critically, only allow-listed, verified sources are indexed. There is no open-submission free-for-all in v1.
+
+5.2 Trusted Source Tiers
+Tier	Source Type	Examples	Vetting Level
+Tier 1 — Official OS Stores	Platform-native stores	Microsoft Store, Apple App Store, Flathub	Inherits platform vetting; code-signed by OS vendor
+Tier 2 — Verified Publishers	Official developer websites/CDNs	Adobe, Valve/Steam, JetBrains, Mozilla, VSCodium	Manual allow-list review + code signature + SBOM required
+Tier 3 — Curated Registries	Well-maintained community package managers	Winget Community Repo, Homebrew Formulae, Chocolatey (verified)	Inherited registry vetting + our automated re-scan
+Tier 4 — Vetted Open Source	GitHub Releases from established projects	VLC, LibreOffice, GIMP, Audacity	Automated: signature check, malware scan, build provenance (SLSA L2+)
+
+Security Policy: Sources not in Tiers 1-4 are rejected. Users cannot add arbitrary download URLs. The allow-list is maintained by a dedicated Registry Governance team with a published appeal process.
+
+5.3 Package Metadata Schema
+Each package entry in the registry contains the following structured metadata:
+Field	Type	Description
+package_id	string (UUID)	Globally unique identifier for the package
+name	string	Display name of the application
+slug	string	URL-safe identifier (e.g. "blender", "vlc-media-player")
+description_short	string (max 160 chars)	One-line summary for search result cards
+description_long	markdown	Full description, features list, changelog (AI-assisted)
+category	enum[]	Primary and secondary categories (e.g. ["Games", "Action", "Marine"])
+developer	object	Publisher name, website, verified status, contact email
+version_latest	semver	Current stable version
+versions	object[]	Version history with release dates and changelogs
+source_tier	enum (1-4)	Trust tier of the installation source
+download_urls	object	Platform-keyed (win_x64, macos_arm64, linux_x86_64) signed download URLs
+checksum_sha256	string	SHA-256 hash of each binary artifact
+code_signature	object	Signing certificate details and Sigstore rekor log ID
+sbom	object	Software Bill of Materials (SPDX or CycloneDX format)
+system_requirements	object	Min/recommended OS, RAM, GPU, disk space
+dependencies	object[]	Required runtimes and their version constraints
+screenshots	string[]	CDN URLs for up to 8 screenshots (1280x720 min)
+icon_url	string	CDN URL for 512x512 app icon
+rating	float	Aggregated user rating (0–5)
+install_count	integer	Total installs across all users on platform
+tags	string[]	Free-form tags for semantic search
+license	string	SPDX license identifier (e.g. "GPL-3.0", "MIT", "Proprietary")
+last_verified	ISO 8601 datetime	Timestamp of last security re-verification
+
+
+5.4 Publisher Onboarding Flow
+Publishers who wish to list their software go through a structured vetting process:
+17.	Publisher submits application via Developer Portal: company details, website, signed app binaries, source code repository (optional).
+18.	Automated Stage 1 — Code Signature Verification: Certificate must be from a trusted CA; checked against revocation lists.
+19.	Automated Stage 2 — Malware Scan: Binary scanned with multiple AV engines (VirusTotal-style aggregation) and heuristic analysis.
+20.	Automated Stage 3 — SBOM Generation: Syft or Trivy generates a Software Bill of Materials; known CVEs flagged.
+21.	Automated Stage 4 — Build Provenance: SLSA Level 2 provenance metadata checked (if available); Sigstore/Rekor log entry created.
+22.	Manual Stage 5 — Registry Governance Review: Human reviewer assesses publisher legitimacy, app category accuracy, and listing quality.
+23.	Decision communicated to publisher. Approved publishers receive a Publisher API Key.
+24.	Future updates submitted via API trigger Stages 1–4 automatically; Stage 5 only for major version changes.
+
+
+6. Security Model
+
+6.1 Security Principles
+•	Zero Trust by default — no package is trusted until cryptographic verification passes.
+•	Defense in depth — multiple independent security checks run at ingestion time and again at install time.
+•	Minimal privilege — the installation agent requests only permissions required for each specific install.
+•	Auditability — every download, verification, and installation event is logged to an immutable audit trail.
+•	Transparency — users can inspect the provenance, signature, SBOM, and source tier for any package.
+
+6.2 Code Signing & Verification
+Every package in the registry must be code-signed by the publisher. At install time, the Trust Layer re-verifies the signature before any binary is executed. The platform uses Sigstore's Cosign toolchain to provide keyless, identity-bound signing tied to OpenID Connect credentials, with all signature events appended to a Rekor transparency log. This means:
+•	Publishers do not manage long-lived private keys (the attack surface of stolen signing keys is eliminated).
+•	Every signed artifact has a tamper-evident entry in a public, auditable ledger.
+•	Certificate revocation is checked in real-time against OCSP and CRL endpoints before installation begins.
+
+6.3 Software Bill of Materials (SBOM)
+All Tier 2–4 packages require an SBOM in either SPDX 2.3 or CycloneDX 1.5 format. The registry stores and publicly exposes SBOMs so users and organisations can independently audit the dependency tree. SBOMs are cross-referenced against:
+•	NVD (National Vulnerability Database) — CVSS scoring of known CVEs.
+•	OSV (Open Source Vulnerabilities) — broader open-source ecosystem vulnerabilities.
+•	GitHub Advisory Database — package-level advisories.
+Packages with unpatched critical (CVSS 9.0+) CVEs are flagged with a security warning badge and optionally blocked from installation depending on user policy settings.
+
+6.4 Supply Chain Attack Mitigations
+Attack Vector	Mitigation
+Compromised Publisher CDN	SHA-256 checksums stored independently in registry; hash mismatch aborts installation
+Typosquatting / Impersonation	Verified publisher badges; domain validation of download URLs against registered publisher domain
+Malicious Update Push	Automated re-scan on every new version; human review triggered for major versions
+Dependency Confusion	Installation agent installs only from registry-authorised sources; no external package manager calls without verification
+SolarWinds-style Build Compromise	SLSA Level 2+ build provenance required for Tier 2; Sigstore signing captures exact build environment hash
+Log4Shell-style Zero-Day in Dependency	SBOM cross-referenced against live CVE feeds; affected packages surfaced immediately to users
+
+6.5 User Privacy & Data Handling
+•	No installation telemetry is sent off-device by default; opt-in only.
+•	Search queries are optionally anonymised before being sent to the LLM backend.
+•	Download URLs are proxied through authenticated CDN endpoints — publisher origin URLs are not exposed to the client.
+•	All data-at-rest in the backend is encrypted (AES-256); data-in-transit uses TLS 1.3 minimum.
+
+
+7. User Experience & Interface Design
+
+7.1 Core UX Principles
+•	Conversational First — search is a natural-language chat bar, not a keyword box.
+•	Structured Results — AI output is always rendered in a predictable, professional card format.
+•	Progressive Disclosure — summary card on search; full detail sheet on expansion; technical specs in a collapsible section.
+•	One Primary Action — every app card has exactly one prominent Install button.
+•	Real-time Feedback — installation progress shown with step labels and live percentage.
+
+7.2 Key Screens
+Screen	Purpose	Key Elements
+Home / Search	Entry point; natural language query input	Large conversational search bar, featured apps carousel, category browse grid
+Search Results	Ranked list of matching apps	App cards (icon, name, short desc, rating, tier badge, Install button), refinement filters
+App Detail Page	Full listing for a single app	Screenshots gallery, long description, system requirements, changelog, SBOM viewer, reviews, provenance badge
+Installation Progress	Real-time install feedback	Step tracker (Verifying → Downloading → Installing → Configuring → Done), cancel option, log viewer
+Library / Installed	Manage installed apps	Grid of installed apps with version, update available badge, uninstall, repair
+Settings	User preferences	Source tier policies, install directory, privacy toggles, update schedule
+Developer Portal	Publisher app submission	Upload binaries, fill metadata, run automated checks, track approval status
+
+7.3 App Listing Card — Specification
+When a user searches "install a game of underwater world", each result card displays:
+
+Section	Content
+Header	App icon (64x64), App name (bold), Developer name, Verified badge, Source Tier badge
+Hero	First screenshot or promotional image (16:9, full card width)
+Summary	2-3 sentences AI-generated summary contextualised to the user's original query
+Quick Specs	Platform icons (Win/Mac/Linux), Version number, File size, License type, Install count
+Rating Strip	Star rating (x/5), review count, date of last update
+System Requirements	Min OS, RAM, GPU, Storage (shown inline as icon-label pairs)
+Action Bar	Primary: Install button (large, prominent). Secondary: View Details, Add to Wishlist
+Provenance	Small "Verified ✓" badge with tooltip showing signature info and last scan date
+
+UX Principle: The Install button must be immediately visible without scrolling. Users should never have to read a wall of text before being able to act. Details are available on demand, not forced.
+
+
+8. Recommended Technology Stack
+
+8.1 Frontend / Desktop Client
+Component	Technology	Rationale
+Desktop Shell	Tauri (Rust + WebView) or Electron	Cross-platform; Tauri preferred for smaller bundle size and better security sandbox
+UI Framework	React + TypeScript	Mature ecosystem, component reuse, strong TypeScript typing
+UI Components	Radix UI + Tailwind CSS	Accessible, unstyled primitives + utility CSS for fast custom design
+State Management	Zustand + React Query	Lightweight state; React Query for server state caching
+Install Progress	WebSocket client (native)	Real-time streaming of installation agent events
+Search Input	Custom AI-aware input with debounce	500ms debounce; renders tokenised intent highlights as user types
+
+8.2 Backend Services
+Service	Technology	Rationale
+API Gateway	FastAPI (Python) or Hono (TypeScript)	High-performance async; OpenAPI schema generation built-in
+Intent Engine	Python + LangChain / LangGraph	Mature LLM orchestration; function calling; RAG pipeline support
+LLM Backend	Claude API (Anthropic) or OpenAI GPT-4o	High accuracy intent parsing; structured output via function calling
+Vector Search	PostgreSQL + pgvector extension	Semantic search over app descriptions; co-located with relational data
+Registry DB	PostgreSQL 16	ACID compliance; JSONB for flexible metadata; full-text search
+Cache	Redis 7	LLM response caching; session state; pub/sub for install progress events
+Message Queue	AWS SQS or Apache Kafka	Decouple installation job dispatch from API layer; retry support
+Installation Agent	Python (LangGraph)	Stateful agentic loop; tool-calling for OS operations
+CDN / Storage	AWS S3 + CloudFront or Cloudflare R2	Fast, geo-distributed binary distribution; signed URLs
+Auth	Clerk or Auth0	Managed identity; supports SSO, passkeys, OAuth providers
+Monitoring	OpenTelemetry + Grafana + Tempo	Distributed tracing; OTLP exporter; vendor-neutral
+Infra / Deploy	Docker + Kubernetes (EKS or GKE)	Container orchestration; auto-scaling; blue/green deploys
+
+
+9. API Design
+
+9.1 Core API Endpoints
+Method	Endpoint	Description
+POST	/api/v1/search	Natural-language app search; body: { query: string, os?: string, limit?: int }; returns ranked app cards
+GET	/api/v1/packages/{id}	Full package detail by ID; returns complete metadata including SBOM link and provenance
+GET	/api/v1/packages/{id}/versions	Version history for a package
+POST	/api/v1/install	Initiate install job; body: { package_id, version?, install_dir? }; returns { job_id }
+GET	/api/v1/install/{job_id}/status	Polling fallback for install status; WebSocket preferred
+WS	/ws/v1/install/{job_id}	WebSocket stream of real-time install progress events
+DELETE	/api/v1/install/{job_id}	Cancel an in-progress installation
+GET	/api/v1/library	List installed packages for authenticated user
+POST	/api/v1/packages/{id}/review	Submit a user review; body: { rating: int, text: string }
+POST	/api/v1/publisher/packages	Publisher: submit new package; multipart form with binaries + metadata
+PUT	/api/v1/publisher/packages/{id}/versions	Publisher: push new version update
+
+9.2 WebSocket Install Event Schema
+The install progress WebSocket emits JSON events in the following format. The UI renders these as a live step tracker:
+
+{ "job_id": "uuid",
+  "event": "step_started" | "step_completed" | "step_failed" | "progress" | "done" | "error",
+  "step": "verify_signature" | "scan_malware" | "resolve_deps" | "download" | "install" | "configure" | "validate",
+  "pct_complete": 0-100,
+  "message": "Human-readable status string",
+  "detail": { ... }  // step-specific detail (e.g. download speed, dep name)
+}
+
+
+10. Installation Pipeline — Deep Dive
+
+10.1 Cross-Platform Installer Adapters
+The AI Installation Agent uses OS-specific adapters that abstract the details of each platform's native installation mechanisms:
+
+Platform	Supported Formats	Silent Install Method	Dependency Sources
+Windows 10/11	MSI, MSIX, EXE (NSIS, InnoSetup), WinGet manifest	msiexec /quiet, WinGet --silent, NSIS /S	WinGet, direct download, Microsoft Store
+macOS 12+	PKG, DMG, ZIP (app bundle), Homebrew formula	installer -pkg -target /, hdiutil + cp, brew install	Homebrew, direct download, Mac App Store
+Ubuntu/Debian Linux	DEB, AppImage, Snap, Flatpak	apt-get install -y, AppImage chmod+execute, snap install	APT, Flatpak, Snap, direct download
+Fedora/RHEL Linux	RPM, AppImage, Flatpak	dnf install -y, Flatpak install	DNF/YUM, Flatpak, direct download
+
+10.2 Dependency Resolution Algorithm
+Dependency resolution follows a topological sort algorithm across the dependency graph:
+25.	Load the installation manifest for the target package.
+26.	For each listed dependency, query the OS's installed software registry.
+27.	Build a directed acyclic graph (DAG) of missing dependencies.
+28.	Perform a topological sort to determine install order.
+29.	For each dependency (leaves first): fetch from registry, verify, install silently.
+30.	After all dependencies are satisfied, install the primary package.
+31.	Run post-install validation. If any validation step fails, trigger rollback.
+
+Edge Case: If two packages require conflicting versions of the same runtime (e.g. App A requires .NET 6.0, App B requires .NET 8.0), the agent installs both versions side-by-side where supported, or warns the user and awaits confirmation.
+
+
+11. Monetisation Model
+
+The platform must balance free user access with sustainable revenue. The following tiers are proposed for v1.
+
+Tier	Price	Features	Target Audience
+Free	$0/mo	Unlimited search and browsing; up to 10 installs/month; Tier 1-3 sources; community support	Casual users
+Pro	$6/mo	Unlimited installs; all source tiers; priority install queues; installation history export; email support	Power users, developers
+Teams	$12/user/mo	All Pro features; shared library; team-managed allow/deny lists; admin dashboard; SSO	Small-medium teams
+Enterprise	Custom	Private registry support; custom vetting SLA; on-premises agent option; SLA 99.9%; dedicated support	Large enterprises
+Publisher Listing	Free (Tier 4) / $0-$500/mo (featured)	Free basic listing; optional featured placement in relevant categories	Software publishers
+
+
+12. Phased Delivery Roadmap
+
+Phase 1 — Foundation (Months 1–3)
+Goal: Functional MVP with natural-language search, structured listing cards, and one-click installation for Windows.
+•	Seed registry with 500 curated Tier 1–2 apps.
+•	Build Intent Engine (LLM + basic keyword fallback).
+•	Windows-only Installation Agent with MSI/EXE/WinGet support.
+•	Basic app detail page with specs and screenshots.
+•	Desktop client (Tauri/Electron) for Windows.
+•	Automated code-signature and malware scanning pipeline.
+
+Phase 2 — Security & Quality (Months 4–6)
+Goal: Production-grade security, macOS support, developer portal.
+•	Sigstore/Cosign integration and SBOM ingestion.
+•	macOS Installation Agent with PKG/DMG/Homebrew support.
+•	Developer Portal with automated vetting pipeline.
+•	SBOM vulnerability cross-referencing (NVD + OSV).
+•	User accounts, library management, and install history.
+•	Semantic vector search (pgvector).
+
+Phase 3 — Scale & Polish (Months 7–9)
+Goal: Linux support, monetisation, 2,000+ app registry.
+•	Linux Installation Agent (DEB/RPM/Flatpak/AppImage).
+•	Pro/Teams subscription tiers.
+•	AI-generated app summaries and comparison features.
+•	Review and rating system.
+•	Publisher analytics dashboard.
+•	Performance optimisation: CDN geo-distribution, install job parallelism.
+
+Phase 4 — Enterprise & Ecosystem (Months 10–12)
+Goal: Enterprise features, private registries, API ecosystem.
+•	Enterprise plan: private registry, on-premises agent.
+•	Public REST API for third-party integrations.
+•	Browser extension for web-sourced install triggers.
+•	Advanced analytics and usage dashboards.
+•	Registry size target: 5,000+ apps.
+
+
+13. Recommended Team Structure
+
+Role	Count	Key Responsibilities
+Product Manager	1	Roadmap, prioritisation, publisher relations, user research
+AI/ML Engineer	2	Intent Engine, Installation Agent, LLM prompt engineering, RAG pipeline
+Backend Engineer	3	Registry service, API gateway, job queue, database design
+Frontend/Desktop Engineer	2	Tauri/Electron shell, React UI, WebSocket integration
+Security Engineer	1	Code signing pipeline, SBOM tooling, supply chain controls, pen testing
+DevOps / Platform Engineer	1	Kubernetes, CI/CD, CDN, monitoring, secrets management
+Registry Governance Analyst	1	Publisher vetting, allow-list management, security policy enforcement
+UX Designer	1	Interface design, user testing, component library
+QA Engineer	1	Automated testing, cross-platform compatibility, install regression tests
+
+
+14. Risks & Mitigations
+
+Risk	Likelihood	Impact	Mitigation
+LLM hallucinating app recommendations	Medium	High	Ground LLM in registry data via RAG; never allow out-of-registry results; output schema validation
+Publisher submits malware	Low	Critical	Multi-layer automated scanning + human review; immediate revocation capability; user notification on compromise
+Supply chain attack on trusted publisher	Low	Critical	SHA-256 checksums stored independently; SBOM cross-ref; hash mismatch hard-blocks install
+Installation agent breaks user's system	Medium	High	Rollback capability; sandboxed install context; pre-install system snapshot for critical apps
+LLM API latency degrades UX	Medium	Medium	Redis caching for common queries; async enrichment; initial response < 800ms target
+Publisher ecosystem too small at launch	High	Medium	Seed with Tier 1 (Microsoft Store, Flathub) and Tier 3 (WinGet, Homebrew) — thousands of apps without manual onboarding
+Antivirus software false-positives on agent	Medium	Medium	Code-sign the installation agent itself; submit to AV vendors for whitelisting; provide clear user guidance
+
+
+15. Glossary
+
+Attribute	Detail
+SBOM	Software Bill of Materials — a formal, machine-readable inventory of the components, libraries, and modules in a software artifact.
+Sigstore	An open-source toolchain for code signing and transparency, providing keyless signing backed by a public immutable log (Rekor).
+SLSA	Supply-chain Levels for Software Artifacts — a security framework that describes levels of build provenance and integrity guarantees.
+RAG	Retrieval-Augmented Generation — an LLM architecture pattern that supplements the model's responses with data retrieved from an external knowledge base at query time.
+ReAct	Reasoning + Acting — an LLM agent pattern where the model iterates between reasoning about its observations and taking actions with external tools.
+Intent Engine	The AI component that parses free-text user queries into structured search parameters understood by the App Registry.
+Installation Agent	The autonomous AI agent that orchestrates all steps required to install an application, from dependency resolution to post-install validation.
+Trust Layer	The security subsystem that performs code-signature verification, malware scanning, and SBOM checks before any binary is executed.
+Source Tier	A classification (1–4) indicating the origin and vetting level of a software package in the registry.
+pgvector	A PostgreSQL extension that adds native vector storage and similarity search, used for semantic search over app descriptions.
+LangGraph	A Python framework built on LangChain for building stateful, multi-actor agentic workflows using a graph-based execution model.
+DAG	Directed Acyclic Graph — used in dependency resolution to model the order in which packages must be installed without circular dependencies.
+
+
+
+AI App Store
+Build Documentation v1.0
+Natural Language  ·  Trusted Sources  ·  One-Click Install  ·  AI-Powered
+
+© 2026 — Confidential
