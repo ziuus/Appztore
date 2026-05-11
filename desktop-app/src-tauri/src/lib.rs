@@ -184,8 +184,27 @@ async fn uninstall_app(
     let mut cmd = Command::new(parts[0]);
     if parts[0] == "flatpak" {
         cmd.args(&["uninstall", "-y", &app_id]);
+    } else if parts[0] == "pacman" || parts[0] == "yay" {
+        cmd.args(&["-R", "--noconfirm", &app_id]);
+    } else if parts[0] == "pkexec" {
+        if parts.len() > 1 {
+            match parts[1] {
+                "pacman" => { cmd.args(&["pacman", "-R", "--noconfirm", &app_id]); },
+                "apt" | "apt-get" => { cmd.args(&["apt", "remove", "-y", &app_id]); },
+                "dnf" => { cmd.args(&["dnf", "remove", "-y", &app_id]); },
+                _ => return Err("Unsupported pkexec command for uninstall".into())
+            }
+        } else {
+             return Err("Unsupported pkexec command for uninstall".into());
+        }
+    } else if parts[0] == "snap" {
+        cmd.args(&["remove", &app_id]);
+    } else if parts[0] == "apt" || parts[0] == "apt-get" {
+        cmd.args(&["remove", "-y", &app_id]);
+    } else if parts[0] == "dnf" {
+        cmd.args(&["remove", "-y", &app_id]);
     } else {
-        return Err("Unsupported package manager for uninstall".into());
+        return Err(format!("Unsupported package manager for uninstall: {}", parts[0]));
     }
 
     let status = cmd.status().map_err(|e| e.to_string())?;
@@ -268,8 +287,9 @@ fn validate_install_command(parts: &[&str]) -> Result<(), String> {
 
 fn validate_uninstall_command(parts: &[&str]) -> Result<(), String> {
     let cmd = parts[0];
-    if cmd != "flatpak" {
-        return Err("Unsupported package manager for uninstall".into());
+    let allowed_uninstallers = ["flatpak", "pacman", "yay", "pkexec", "snap", "apt", "apt-get", "dnf"];
+    if !allowed_uninstallers.contains(&cmd) {
+        return Err(format!("Unsupported package manager for uninstall: {}", cmd));
     }
     if parts.iter().any(|p| has_shell_metachars(p)) {
         return Err("Invalid characters in command".into());

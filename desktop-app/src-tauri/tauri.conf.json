@@ -25,7 +25,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self' tauri: localhost 127.0.0.1; script-src 'self' https://apis.google.com https://www.gstatic.com https://www.google-analytics.com https://identitytoolkit.googleapis.com 'unsafe-inline' 'unsafe-eval'; img-src 'self' https: data: tauri: localhost 127.0.0.1; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; connect-src 'self' http://localhost:8000 http://127.0.0.1:8000 https://api.groq.com https://api.openai.com https://*.firebaseio.com https://*.googleapis.com https://*.firebaseapp.com https://identitytoolkit.googleapis.com; frame-src 'self' https://*.firebaseapp.com https://*.googleapis.com;"
+      "csp": "default-src 'self' tauri: localhost 127.0.0.1; script-src 'self' https: https://*.google.com https://*.gstatic.com https://*.googleapis.com https://*.firebaseapp.com 'unsafe-inline' 'unsafe-eval'; img-src 'self' https: data: tauri: localhost 127.0.0.1; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; connect-src 'self' http://localhost:8000 http://127.0.0.1:8000 https://*.groq.com https://*.openai.com https://*.firebaseio.com https://*.googleapis.com https://*.firebaseapp.com https://identitytoolkit.googleapis.com; frame-src 'self' https://*.firebaseapp.com https://*.googleapis.com;"
     }
   },
   "bundle": {

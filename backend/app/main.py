@@ -6,11 +6,17 @@ import re
 import subprocess
 
 from dotenv import load_dotenv
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from flask import Flask, jsonify, request
 from flask_cors import CORS
-from openai import OpenAI
+import litellm
+from litellm import completion
 
 load_dotenv()
+
+# Configure LiteLLM to not send telemetry
+litellm.telemetry = False
+litellm.drop_params = True  # Auto-drop unsupported params per provider
 
 # Setup Logging
 logging.basicConfig(
@@ -64,29 +70,206 @@ def handle_404(e):
     return jsonify({"error": "Not found"}), 404
 
 
-# Initialize AI client
+# =============================================================================
+# AI Provider System - Powered by LiteLLM (100+ Providers Unified)
+# =============================================================================
+#
+# LiteLLM provides a single OpenAI-compatible interface for 100+ LLMs:
+# - OpenAI, Anthropic, Groq, Google Gemini, Mistral, Together AI
+# - AWS Bedrock, Azure OpenAI, Ollama, vLLM, Fireworks, Perplexity
+# - And many more...
+#
+# Model Format: "provider/model_name"
+# Examples:
+# - "groq/llama-3.3-70b-versatile"
+# - "openai/gpt-4o"
+# - "anthropic/claude-3-5-sonnet-20241022"
+# - "gemini/gemini-2.0-flash"
+# - "ollama/llama3.1:8b" (local)
+#
+# Environment Variables (auto-detected by LiteLLM):
+# - GROQ_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, GOOGLE_API_KEY
+# - AZURE_API_KEY, AWS_ACCESS_KEY_ID, etc.
+# =============================================================================
+
 DEVELOPMENT = os.environ.get("DEVELOPMENT", "false").lower() == "true"
 MOCK = os.environ.get("MOCK", "false").lower() == "true"
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
-client = None
-MODEL = None
+# Provider priority order for default model
+PROVIDER_PRIORITY = [
+    ("GROQ_API_KEY", "groq/llama-3.3-70b-versatile"),
+    ("OPENAI_API_KEY", "openai/gpt-4o-mini"),
+    ("ANTHROPIC_API_KEY", "anthropic/claude-3-5-sonnet-20241022"),
+    ("GOOGLE_API_KEY", "gemini/gemini-2.0-flash"),
+]
 
-if not MOCK:
-    openai_api_key = os.environ.get("OPENAI_API_KEY")
-    # Prioritize Groq if key is present
-    if GROQ_API_KEY:
-        client = OpenAI(base_url="https://api.groq.com/openai/v1", api_key=GROQ_API_KEY)
-        MODEL = "llama-3.3-70b-versatile"
-        print(f"AI: Groq Backend Initialized ({MODEL})", flush=True)
-    elif openai_api_key:
-        client = OpenAI(api_key=openai_api_key)
-        MODEL = "gpt-4o"
-        print(f"AI: OpenAI Backend Initialized ({MODEL})", flush=True)
-    else:
-        client = None
-        MODEL = None
-        print("AI: No API keys found. Using keyword fallback.", flush=True)
+# Find first available provider for default model
+DEFAULT_AI_MODEL = None
+for env_var, default_model in PROVIDER_PRIORITY:
+    if os.environ.get(env_var):
+        DEFAULT_AI_MODEL = default_model
+        print(
+            f"AI: Default provider detected - {default_model.split('/')[0].upper()}",
+            flush=True,
+        )
+        break
+
+if not DEFAULT_AI_MODEL:
+    print("AI: No default API keys found. Using keyword fallback.", flush=True)
+else:
+    print(f"AI: Default model: {DEFAULT_AI_MODEL}", flush=True)
+
+
+def detect_provider_from_key(api_key: str) -> str:
+    """
+    Try to detect the provider from an API key format.
+    Returns the provider prefix for LiteLLM.
+    """
+    if not api_key:
+        return None
+
+    # Groq keys: gsk_...
+    if api_key.startswith("gsk_"):
+        return "groq"
+
+    # Anthropic keys often start with sk-ant- (check BEFORE generic sk-)
+    if api_key.startswith("sk-ant-"):
+        return "anthropic"
+
+    # OpenAI keys: sk-...
+    # sk-proj-... is OpenAI project key
+    if api_key.startswith("sk-"):
+        # Default to OpenAI for sk-*, but user can override with explicit provider
+        return "openai"
+
+    # Google AI Studio keys: AI...
+    if api_key.startswith("AI"):
+        return "gemini"
+
+    # Mistral keys often start with "uk-" or "bb-"
+    if api_key.startswith("uk-") or api_key.startswith("bb-"):
+        return "mistral"
+
+    return None
+
+
+def get_ai_config(api_key: str = None, provider: str = None, model: str = None):
+    """
+    Unified AI configuration using LiteLLM.
+
+    Args:
+        api_key: Optional API key for BYOK
+        provider: Optional provider override (e.g., "groq", "openai", "anthropic")
+        model: Optional full model string or model name without provider
+
+    Returns:
+        Tuple of (model_string, api_key_dict) for use with litellm.completion()
+        Returns (None, None) if no AI available
+    """
+    if MOCK:
+        return None, None
+
+    # Case 1: BYOK with explicit key
+    if api_key:
+        # Detect provider if not specified
+        if not provider:
+            provider = detect_provider_from_key(api_key)
+
+        # If model is provided with provider prefix, use it directly
+        if model and "/" in model:
+            full_model = model
+        elif model and provider:
+            full_model = f"{provider}/{model}"
+        elif provider:
+            # Use default models per provider
+            default_models = {
+                "groq": "groq/llama-3.3-70b-versatile",
+                "openai": "openai/gpt-4o-mini",
+                "anthropic": "anthropic/claude-3-5-sonnet-20241022",
+                "gemini": "gemini/gemini-2.0-flash",
+                "mistral": "mistral/mistral-large-latest",
+                "together": "together_ai/meta-llama/Llama-3-70b-chat-hf",
+                "perplexity": "perplexity/llama-3.1-sonar-large-128k-online",
+                "fireworks": "fireworks_ai/llama-v3p1-405b-instruct",
+            }
+            full_model = default_models.get(provider, f"{provider}/default")
+        else:
+            # Couldn't determine provider, default to OpenAI format
+            full_model = "openai/gpt-4o-mini"
+
+        # Return config with explicit API key
+        api_kwargs = {"api_key": api_key}
+
+        # Add base_url for providers that need it (OpenAI-compatible endpoints)
+        if provider == "groq":
+            api_kwargs["api_base"] = "https://api.groq.com/openai/v1"
+
+        return full_model, api_kwargs
+
+    # Case 2: Use default provider from environment
+    if DEFAULT_AI_MODEL:
+        # Check if model override was provided
+        if model:
+            if "/" in model:
+                return model, {}  # Full model string provided
+            # Try to use same provider with different model
+            provider_prefix = DEFAULT_AI_MODEL.split("/")[0]
+            return f"{provider_prefix}/{model}", {}
+
+        return DEFAULT_AI_MODEL, {}
+
+    # No AI available
+    return None, None
+
+
+def ai_complete(model: str, messages: list, api_kwargs: dict = None, **kwargs):
+    """
+    Unified AI completion using LiteLLM.
+
+    Works with 100+ providers through a single interface.
+    Response format is OpenAI-compatible.
+
+    Example:
+        response = ai_complete(
+            model="groq/llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": "Hello"}],
+            response_format={"type": "json_object"}
+        )
+        content = response.choices[0].message.content
+
+    Args:
+        model: Full LiteLLM model string (provider/model)
+        messages: List of message dicts
+        api_kwargs: Dict with api_key, api_base, etc.
+        **kwargs: Additional args for completion (temperature, response_format, etc.)
+
+    Returns:
+        OpenAI-compatible response object
+    """
+    if api_kwargs is None:
+        api_kwargs = {}
+
+    return completion(model=model, messages=messages, **api_kwargs, **kwargs)
+
+
+# Backward compatibility aliases (for code that still uses old get_ai_client pattern)
+# These will be phased out
+def get_ai_client(api_key=None):
+    """
+    Deprecated: Use get_ai_config() and ai_complete() instead.
+    Kept for backward compatibility during transition.
+    """
+    model, api_kwargs = get_ai_config(api_key)
+    if not model:
+        return None, None
+    # Return a "client" that's actually just the model + kwargs tuple
+    # We'll handle this specially in the calling code
+    return (model, api_kwargs), model
+
+
+# For backward compatibility - we'll need to update call sites
+# The old pattern was: client.chat.completions.create(...)
+# New pattern is: ai_complete(model, messages, ...)
 
 
 API_TOKEN = os.environ.get("APP_API_TOKEN")
@@ -105,97 +288,248 @@ def _require_auth():
 MOCK_REGISTRY = []
 
 
+# Specific high-fidelity image mapping to avoid broken/generic images
+APP_ASSETS = {
+    "org.videolan.VLC": {
+        "icon": "https://upload.wikimedia.org/wikipedia/commons/e/e6/VLC_Icon.svg",
+        "hero": "https://images.unsplash.com/photo-1594909122845-11baa439b7bf?q=80&w=1200",
+    },
+    "org.mozilla.firefox": {
+        "icon": "https://upload.wikimedia.org/wikipedia/commons/a/a0/Firefox_logo%2C_2019.svg",
+        "hero": "https://images.unsplash.com/photo-1512941937669-90a1b58e7e9c?q=80&w=1200",
+    },
+    "com.visualstudio.code": {
+        "icon": "https://upload.wikimedia.org/wikipedia/commons/9/9a/Visual_Studio_Code_1.35_icon.svg",
+        "hero": "https://images.unsplash.com/photo-1542831371-29b0f74f9713?q=80&w=1200",
+    },
+    "com.valvesoftware.Steam": {
+        "icon": "https://upload.wikimedia.org/wikipedia/commons/8/83/Steam_icon_logo.svg",
+        "hero": "https://images.unsplash.com/photo-1580234797602-22c37b2a6230?q=80&w=1200",
+    },
+    "org.gimp.GIMP": {
+        "icon": "https://upload.wikimedia.org/wikipedia/commons/4/45/The_GIMP_icon_-_gnome.svg",
+        "hero": "https://images.unsplash.com/photo-1558655146-d09347e92766?q=80&w=1200",
+    },
+    "org.inkscape.Inkscape": {
+        "icon": "https://upload.wikimedia.org/wikipedia/commons/0/0d/Inkscape_logo.svg",
+        "hero": "https://images.unsplash.com/photo-1626785774573-4b799315345d?q=80&w=1200",
+    },
+    "org.kde.krita": {
+        "icon": "https://upload.wikimedia.org/wikipedia/commons/7/73/Krita-logo.svg",
+        "hero": "https://images.unsplash.com/photo-1547826039-bfc35e0f1ea8?q=80&w=1200",
+    },
+    "md.obsidian.Obsidian": {
+        "icon": "https://upload.wikimedia.org/wikipedia/commons/1/10/Obsidian_logo.svg",
+        "hero": "https://images.unsplash.com/photo-1455390582262-044cdead277a?q=80&w=1200",
+    },
+    "org.blender.Blender": {
+        "icon": "https://upload.wikimedia.org/wikipedia/commons/0/0c/Blender_logo_no_text.svg",
+        "hero": "https://images.unsplash.com/photo-1633356122544-f134324a6cee?q=80&w=1200",
+    },
+    "org.gimp.GIMP": {
+        "icon": "https://upload.wikimedia.org/wikipedia/commons/4/45/The_GIMP_icon_-_gnome.svg",
+        "hero": "https://images.unsplash.com/photo-1558655146-d09347e92766?q=80&w=1200",
+    },
+    "org.kde.krita": {
+        "icon": "https://upload.wikimedia.org/wikipedia/commons/7/73/Krita-logo.svg",
+        "hero": "https://images.unsplash.com/photo-1547826039-bfc35e0f1ea8?q=80&w=1200",
+    },
+    "org.inkscape.Inkscape": {
+        "icon": "https://upload.wikimedia.org/wikipedia/commons/0/0d/Inkscape_logo.svg",
+        "hero": "https://images.unsplash.com/photo-1626785774573-4b799315345d?q=80&w=1200",
+    },
+    "org.videolan.VLC": {
+        "icon": "https://upload.wikimedia.org/wikipedia/commons/e/e6/VLC_Icon.svg",
+        "hero": "https://images.unsplash.com/photo-1594909122845-11baa439b7bf?q=80&w=1200",
+    },
+    "com.obsproject.Studio": {
+        "icon": "https://upload.wikimedia.org/wikipedia/commons/d/d3/OBS_Studio_logo.svg",
+        "hero": "https://images.unsplash.com/photo-1593642702821-c8da6771f0c6?q=80&w=1200",
+    },
+    "org.mozilla.firefox": {
+        "icon": "https://upload.wikimedia.org/wikipedia/commons/a/a0/Firefox_logo%2C_2019.svg",
+        "hero": "https://images.unsplash.com/photo-1512941937669-90a1b58e7e9c?q=80&w=1200",
+    },
+    "org.gnome.Terminal": {
+        "icon": "https://upload.wikimedia.org/wikipedia/commons/0/00/Terminal_icon.svg",
+        "hero": "https://images.unsplash.com/photo-1629654297299-c8506221ca97?q=80&w=1200",
+    },
+    "org.gnome.Nautilus": {
+        "icon": "https://upload.wikimedia.org/wikipedia/commons/e/ec/Nautilus_icon.svg",
+        "hero": "https://images.unsplash.com/photo-1544391496-1ca7c97457cd?q=80&w=1200",
+    },
+    "org.kde.dolphin": {
+        "icon": "https://upload.wikimedia.org/wikipedia/commons/3/36/Dolphin-icon.svg",
+        "hero": "https://images.unsplash.com/photo-1544391496-1ca7c97457cd?q=80&w=1200",
+    },
+    "org.gnome.Calculator": {
+        "icon": "https://upload.wikimedia.org/wikipedia/commons/4/4c/Calculator_icon.svg",
+        "hero": "https://images.unsplash.com/photo-1554224155-1696413565d3?q=80&w=1200",
+    },
+    "com.discordapp.Discord": {
+        "icon": "https://upload.wikimedia.org/wikipedia/commons/7/73/Discord_Color_Logo.svg",
+        "hero": "https://images.unsplash.com/photo-1614680376593-902f74cf0d41?q=80&w=1200",
+    },
+}
+
+
+def categorize_app(name, description, app_id=""):
+    """Categorize an application based on its name, description and ID."""
+    text = f"{name} {description} {app_id}".lower()
+
+    if any(x in text for x in ["game", "steam", "gaming", "kart", "retroarch", "emu"]):
+        return "Gaming"
+    elif any(
+        x in text
+        for x in ["code", "dev", "ide", "studio", "vim", "git", "compiler", "terminal"]
+    ):
+        return "Development"
+    elif any(
+        x in text
+        for x in [
+            "gimp",
+            "krita",
+            "paint",
+            "design",
+            "draw",
+            "photo",
+            "image",
+            "inkscape",
+            "blender",
+            "3d",
+        ]
+    ):
+        return "Design"
+    elif any(
+        x in text
+        for x in ["vlc", "video", "media", "player", "movie", "obs-studio", "handbrake"]
+    ):
+        return "Video"
+    elif any(
+        x in text for x in ["music", "audio", "sound", "spotify", "audacity", "ardour"]
+    ):
+        return "Audio & Music"
+    elif any(
+        x in text
+        for x in [
+            "chat",
+            "message",
+            "discord",
+            "slack",
+            "telegram",
+            "whatsapp",
+            "signal",
+            "zoom",
+            "teams",
+        ]
+    ):
+        return "Communication"
+    elif any(
+        x in text for x in ["browser", "firefox", "chrome", "web", "internet", "brave"]
+    ):
+        return "Web Browser"
+    elif any(
+        x in text
+        for x in [
+            "office",
+            "document",
+            "spreadsheet",
+            "libreoffice",
+            "onlyoffice",
+            "obsidian",
+            "notion",
+        ]
+    ):
+        return "Productivity"
+    elif any(
+        x in text
+        for x in ["ai", "gpt", "llama", "stable-diffusion", "neural", "tensor"]
+    ):
+        return "AI Tools"
+    else:
+        return "Utilities"
+
+
+def get_app_assets(app_id, name):
+    """Retrieve high-fidelity assets for a specific app_id."""
+    if app_id in APP_ASSETS:
+        return APP_ASSETS[app_id]
+
+    # Check if a substring match exists for common IDs
+    for key, assets in APP_ASSETS.items():
+        if key.lower() in app_id.lower() or app_id.lower() in key.lower():
+            return assets
+
+    # Use Flathub remote icons directly if app_id looks like a Flatpak ID
+    if "." in app_id and len(app_id.split(".")) >= 3:
+        icon_url = (
+            f"https://dl.flathub.org/repo/appstream/x86_64/icons/128x128/{app_id}.png"
+        )
+    else:
+        # Dynamic generation fallback (Initials look like sleek app logos)
+        from urllib.parse import quote
+
+        encoded_name = quote(name)
+        icon_url = f"https://api.dicebear.com/7.x/initials/svg?seed={encoded_name}&backgroundColor=030303&fontSize=45&fontFamily=Arial"
+
+    return {
+        "icon": icon_url,
+        "hero": "https://images.unsplash.com/photo-1614850523296-d8c1af93d400?q=80&w=1200",
+    }
+
+
 def get_flatpak_apps(search_term=None):
     """Fetch apps from Flathub using flatpak search command."""
     try:
-        cmd = [
-            "flatpak",
-            "--system",
-            "search",
-            "--columns=name,application,description",
-        ]
+        cmd = ["flatpak", "search", "--columns=name,application,description"]
         if search_term:
-            cmd.append(search_term)
-        # Removed --app flag as it may not be supported in all versions
+            cmd.extend(search_term.split())
+        else:
+            cmd.append("editor")
 
-        print(f"Running flatpak command: {' '.join(cmd)}", flush=True)
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=4)
-        print(f"Flatpak command result: returncode={result.returncode}", flush=True)
-        if result.stdout:
-            print(
-                f"Flatpak stdout (first 200 chars): {result.stdout[:200]}", flush=True
-            )
-        if result.stderr:
-            print(f"Flatpak stderr: {result.stderr}", flush=True)
-
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
         if result.returncode != 0:
-            print(f"Flatpak search failed: {result.stderr}")
             return []
 
         apps = []
         lines = result.stdout.strip().split("\n")
-        print(f"Flatpak output lines: {len(lines)}", flush=True)
-        if len(lines) < 1:  # No data at all
-            print("No lines from flatpak output")
+        if not lines or "No matches found" in lines[0]:
             return []
 
-        # Skip header line if it exists
-        data_lines = lines[1:] if len(lines) > 1 else lines
-        print(f"Data lines to process: {len(data_lines)}", flush=True)
-
-        # Process each line
-        for line in data_lines:
-            if not line.strip():
+        for line in lines[:30]:  # Limit results
+            if not line.strip() or "Name\tApplication ID" in line or "Name " in line:
                 continue
             parts = line.split("\t")
             if len(parts) >= 3:
                 name, app_id, description = parts[0], parts[1], parts[2]
-                # Determine category from app_id or name (simplified)
-                category = "Utilities"  # default
-                if any(x in app_id.lower() for x in ["game", "steam"]):
-                    category = "Gaming"
-                elif any(x in app_id.lower() for x in ["code", "dev", "ide", "studio"]):
-                    category = "Development"
-                elif any(
-                    x in app_id.lower()
-                    for x in ["gimp", "paint", "design", "draw", "photo", "image"]
-                ):
-                    category = "Design"
-                elif any(
-                    x in app_id.lower() for x in ["vlc", "video", "media", "player"]
-                ):
-                    category = "Media Player"
-                elif any(x in app_id.lower() for x in ["blender", "3d", "model"]):
-                    category = "3D Creation"
-                elif any(x in app_id.lower() for x in ["music", "audio", "sound"]):
-                    category = "Audio & Music"
-                elif any(
-                    x in app_id.lower()
-                    for x in ["chat", "message", "talk", "discord", "slack", "telegram"]
-                ):
-                    category = "Communication"
 
+                # Skip runtimes/extensions
+                if any(
+                    x.lower() in app_id.lower()
+                    for x in [".platform", ".sdk", ".locale", ".debug", ".runtime"]
+                ):
+                    continue
+
+                assets = get_app_assets(app_id, name)
                 apps.append(
                     {
                         "id": app_id,
                         "name": name,
-                        "developer": "Flathub",  # Simplified
-                        "category": category,
+                        "developer": "Flathub",
+                        "category": categorize_app(name, description, app_id),
                         "description": description.strip(),
-                        "icon_url": get_system_icon(name),
-                        "install_tier": 2,  # Default tier
-                        "hero_image": f"https://images.unsplash.com/photo-1614850523296-d8c1af93d400?q=80&w=800&auto=format&fit=crop",
-                        "install_command": f"flatpak install --system flathub {app_id}",
+                        "icon_url": assets["icon"],
+                        "install_tier": 2,
+                        "hero_image": assets["hero"],
+                        "install_command": f"flatpak install -y flathub {app_id}",
                         "source": "flatpak",
+                        "rating": 4.8,
+                        "downloads": "1M+",
                     }
                 )
-        print(f"Found {len(apps)} apps from flatpak search", flush=True)
         return apps
     except Exception as e:
-        print(f"Error fetching flatpak apps: {e}", flush=True)
-        import traceback
-
-        traceback.print_exc()
+        logger.error(f"Flatpak error: {e}")
         return []
 
 
@@ -213,7 +547,7 @@ def get_pacman_apps(search_term=None):
     try:
         cmd = ["pacman", "-Ss"]
         if search_term:
-            cmd.append(search_term)
+            cmd.extend(search_term.split())
         else:
             cmd = ["pacman", "-Ssq"]
 
@@ -305,7 +639,7 @@ def get_yay_apps(search_term=None):
     try:
         cmd = ["yay", "-Ss"]
         if search_term:
-            cmd.append(search_term)
+            cmd.extend(search_term.split())
         else:
             return get_popular_aur_apps()
 
@@ -385,19 +719,15 @@ def get_popular_aur_apps():
 def get_docker_apps(search_term=None):
     """Fetch popular Docker images from Docker Hub."""
     try:
-        # For Docker Hub, we'll search popular images
-        # Note: Docker Hub API requires authentication for extensive use, so we'll use a curated approach
         popular_images = [
             {"name": "nginx", "desc": "Official NGINX Docker image"},
             {"name": "mysql", "desc": "Official MySQL Docker image"},
             {"name": "postgres", "desc": "Official PostgreSQL Docker image"},
             {"name": "redis", "desc": "Official Redis Docker image"},
             {"name": "mongo", "desc": "Official MongoDB Docker image"},
-            {"name": "elasticsearch", "desc": "Official Elasticsearch Docker image"},
             {"name": "wordpress", "desc": "Official WordPress Docker image"},
             {"name": "python", "desc": "Official Python Docker image"},
             {"name": "node", "desc": "Official Node.js Docker image"},
-            {"name": "golang", "desc": "Official Go Docker image"},
         ]
 
         apps = []
@@ -412,216 +742,212 @@ def get_docker_apps(search_term=None):
                         "id": f"docker:{img['name']}",
                         "name": img["name"],
                         "developer": "Docker Hub Official",
-                        "category": categorize_app(img["name"], img["desc"]),
+                        "category": categorize_app(
+                            img["name"], img["desc"], f"docker:{img['name']}"
+                        ),
                         "description": img["desc"],
-                        "icon_url": "https://via.placeholder.com/128",
-                        "install_tier": 2,  # Docker images - medium tier
-                        "hero_image": "https://via.placeholder.com/800x400",
-                        "install_command": f"docker run -d -p 8080:80 {img['name']}",  # Simplified run command
+                        "icon_url": f"https://api.dicebear.com/7.x/identicon/svg?seed=docker-{img['name']}&backgroundColor=030303",
+                        "install_tier": 2,
+                        "hero_image": "https://images.unsplash.com/photo-1605745341112-85968b193ef5?q=80&w=800",
+                        "install_command": f"docker run -d -p 8080:80 {img['name']}",
                         "source": "docker",
                         "is_container": True,
                     }
                 )
 
-        return apps if search_term else apps[:5]  # Return first 5 if no search
+        return apps
     except Exception as e:
-        print(f"Error fetching docker apps: {e}", flush=True)
+        logger.error(f"Docker error: {e}")
         return []
-
-
-def categorize_app(name, description):
-    """Categorize an application based on its name and description."""
-    text = f"{name} {description}".lower()
-
-    if any(x in text for x in ["game", "steam", "gaming", "2d", "3d"]):
-        return "Gaming"
-    elif any(
-        x in text
-        for x in [
-            "code",
-            "dev",
-            "ide",
-            "studio",
-            "editor",
-            "program",
-            "ide",
-            "vim",
-            "neovim",
-            "emacs",
-        ]
-    ):
-        return "Development"
-    elif any(
-        x in text
-        for x in [
-            "gimp",
-            "paint",
-            "design",
-            "draw",
-            "photo",
-            "image",
-            "photoshop",
-            "illustrator",
-            "sketch",
-            "grafik",
-        ]
-    ):
-        return "Design"
-    elif any(
-        x in text
-        for x in [
-            "vlc",
-            "video",
-            "media",
-            "player",
-            "movie",
-            "music",
-            "audio",
-            "spotify",
-            "netflix",
-            "youtube",
-        ]
-    ):
-        return "Media Player"
-    elif any(x in text for x in ["blender", "3d", "model", "animation", "cad", "maya"]):
-        return "3D Creation"
-    elif any(
-        x in text
-        for x in ["music", "audio", "sound", "spotify", "audacity", "rhythmbox"]
-    ):
-        return "Audio & Music"
-    elif any(
-        x in text
-        for x in [
-            "chat",
-            "message",
-            "talk",
-            "discord",
-            "slack",
-            "telegram",
-            "whatsapp",
-            "signal",
-        ]
-    ):
-        return "Communication"
-    elif any(x in text for x in ["browser", "firefox", "chrome", "web", "internet"]):
-        return "Web Browser"
-    elif any(
-        x in text
-        for x in [
-            "office",
-            "document",
-            "spreadsheet",
-            "presentation",
-            "libreoffice",
-            "onlyoffice",
-        ]
-    ):
-        return "Productivity"
-    elif any(
-        x in text
-        for x in [
-            "terminal",
-            "console",
-            "shell",
-            "tmux",
-            "screen",
-            "alacritty",
-            "kitty",
-        ]
-    ):
-        return "Development"  # Terminals are dev tools
-    else:
-        return "Utilities"
 
 
 def get_custom_build_apps(search_term=None):
     """Fetch applications that need to be built from source (from popular repos like GitHub trending)."""
-    # For now, we'll return a curated list of popular open-source projects that users might want to build
-    # In a production system, this could integrate with GitHub API, GitLab API, etc.
     custom_apps = [
         {
-            "id": "neovim/neovim",
+            "id": "github:neovim/neovim",
             "name": "Neovim",
             "developer": "Neovim Team",
             "category": "Development",
             "description": "Vim-fork focused on extensibility and usability",
-            "icon_url": "https://via.placeholder.com/128",
-            "install_tier": 3,  # Higher tier for custom builds
-            "hero_image": "https://via.placeholder.com/800x400",
+            "icon_url": "https://api.dicebear.com/7.x/initials/svg?seed=neovim&backgroundColor=030303&fontSize=45&fontFamily=Arial",
+            "install_tier": 3,
+            "hero_image": "https://images.unsplash.com/photo-1542831371-29b0f74f9713?q=80&w=800",
             "install_command": "git clone https://github.com/neovim/neovim.git && cd neovim && make CMAKE_BUILD_TYPE=RelWithDebInfo && sudo make install",
-            "build_required": True, "repo_type": "web", "source": "Custom",
+            "source": "github",
         },
         {
-            "id": "vim/vim",
-            "name": "Vim",
-            "developer": "Vim Team",
-            "category": "Development",
-            "description": "Highly configurable text editor built to enable efficient text editing",
-            "icon_url": "https://via.placeholder.com/128",
+            "id": "github:photoflare/photoflare",
+            "name": "Photoflare",
+            "developer": "Photoflare Team",
+            "category": "Design",
+            "description": "Quick, simple but powerful Cross Platform image editor.",
+            "icon_url": "https://upload.wikimedia.org/wikipedia/commons/e/ec/Nautilus_icon.svg",
             "install_tier": 3,
-            "hero_image": "https://via.placeholder.com/800x400",
-            "install_command": "git clone https://github.com/vim/vim.git && cd vim && ./configure --with-features=huge --enable-multibyte --enable-python3interp=yes && make && sudo make install",
-            "build_required": True, "repo_type": "web", "source": "Custom",
+            "hero_image": "https://images.unsplash.com/photo-1626785774573-4b799315345d?q=80&w=800",
+            "install_command": "git clone https://github.com/photoflare/photoflare.git && cd photoflare && qmake && make && sudo make install",
+            "source": "github",
         },
         {
-            "id": "tmux/tmux",
-            "name": "Tmux",
-            "developer": "Tmux Developers",
-            "category": "Development",
-            "description": "Terminal multiplexer - switch easily between several programs in one terminal",
-            "icon_url": "https://via.placeholder.com/128",
+            "id": "github:pixelitor/pixelitor",
+            "name": "Pixelitor",
+            "developer": "Pixelitor Devs",
+            "category": "Design",
+            "description": "Advanced image editor with support for layers, layer masks, text layers, multiple undo, blending modes, etc.",
+            "icon_url": "https://api.dicebear.com/7.x/initials/svg?seed=pixelitor&backgroundColor=030303&fontSize=45&fontFamily=Arial",
             "install_tier": 3,
-            "hero_image": "https://via.placeholder.com/800x400",
-            "install_command": "git clone https://github.com/tmux/tmux.git && cd tmux && sh autogen.sh && ./configure && make && sudo make install",
-            "build_required": True, "repo_type": "web", "source": "Custom",
+            "hero_image": "https://images.unsplash.com/photo-1547826039-bfc35e0f1ea8?q=80&w=800",
+            "install_command": "git clone https://github.com/pixelitor/pixelitor.git && cd pixelitor && ./gradlew build",
+            "source": "github",
         },
         {
-            "id": "ristretto/ristretto",
-            "name": "Ristretto",
-            "developer": "Xfce Developers",
-            "category": "Graphics and Design",
-            "description": "Fast and lightweight picture-viewer for Xfce Desktop Environment",
-            "icon_url": "https://via.placeholder.com/128",
+            "id": "github:rapidraw/rapidraw",
+            "name": "Rapidraw",
+            "developer": "Rapidraw Org",
+            "category": "Design",
+            "description": "GPU-accelerated RAW image editor for fast processing.",
+            "icon_url": "https://api.dicebear.com/7.x/initials/svg?seed=rapidraw&backgroundColor=030303&fontSize=45&fontFamily=Arial",
             "install_tier": 3,
-            "hero_image": "https://via.placeholder.com/800x400",
-            "install_command": "git clone https://git.xfce.org/xfapps/ristretto && cd ristretto && ./autogen.sh --prefix=/usr && make && sudo make install",
-            "build_required": True, "repo_type": "web", "source": "Custom",
+            "hero_image": "https://images.unsplash.com/photo-1558655146-d09347e92766?q=80&w=800",
+            "install_command": "git clone https://github.com/rapidraw/rapidraw.git && cd rapidraw && cmake . && make && sudo make install",
+            "source": "github",
         },
     ]
 
-    # Filter by search term if provided
     if search_term:
         search_lower = search_term.lower()
-        filtered_apps = [
+        return [
             app
             for app in custom_apps
             if search_lower in app["name"].lower()
             or search_lower in app["description"].lower()
-            or search_lower in app["category"].lower()
         ]
-        return (
-            filtered_apps if filtered_apps else custom_apps[:2]
-        )  # Return first 2 if no matches
-
-    # Return a subset to avoid overwhelming (in real implementation, we'd fetch trending/popular)
-    return custom_apps[:3]
+    return custom_apps
 
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
+def get_generic_linux_apps(cmd_name, search_term, source_label, install_template):
+    """Generic helper for simple package manager searches."""
+    import shutil
+
+    if not shutil.which(cmd_name):
+        return []
+
+    try:
+        if not search_term:
+            return []
+
+        cmd = []
+        if cmd_name == "apt":
+            cmd = ["apt-cache", "search", search_term]
+        elif cmd_name == "dnf":
+            cmd = ["dnf", "search", search_term]
+        elif cmd_name == "snap":
+            cmd = ["snap", "find", search_term]
+        elif cmd_name == "zypper":
+            cmd = ["zypper", "search", search_term]
+        else:
+            return []
+
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        if result.returncode != 0:
+            return []
+
+        apps = []
+        lines = result.stdout.strip().split("\n")
+
+        for line in lines[:20]:  # Limit results per source
+            if not line.strip():
+                continue
+
+            name = ""
+            description = ""
+
+            if cmd_name == "apt":
+                parts = line.split(" - ", 1)
+                name = parts[0].strip()
+                description = parts[1].strip() if len(parts) > 1 else ""
+            elif cmd_name == "dnf":
+                parts = line.split(" : ", 1)
+                name = parts[0].strip()
+                description = parts[1].strip() if len(parts) > 1 else ""
+            elif cmd_name == "snap":
+                # snap find output: Name  Version  Publisher  Notes  Summary
+                parts = re.split(r"\s{2,}", line)
+                if len(parts) >= 2 and parts[0] != "Name":
+                    name = parts[0]
+                    description = parts[-1]
+                else:
+                    continue
+            elif cmd_name == "zypper":
+                parts = line.split("|")
+                if len(parts) >= 3:
+                    name = parts[1].strip()
+                    description = parts[2].strip()
+                else:
+                    continue
+
+            if name:
+                apps.append(
+                    {
+                        "id": f"{cmd_name}:{name}",
+                        "name": name,
+                        "developer": f"{source_label.upper()} Repository",
+                        "category": categorize_app(name, description),
+                        "description": description,
+                        "icon_url": get_system_icon(name),
+                        "install_tier": 1,
+                        "hero_image": "https://images.unsplash.com/photo-1614850523296-d8c1af93d400?q=80&w=800",
+                        "install_command": install_template.format(name),
+                        "source": source_label,
+                    }
+                )
+        return apps
+    except Exception as e:
+        logger.error(f"Error in {cmd_name} search: {e}")
+        return []
+
+
+def get_snap_apps(search_term=None):
+    return get_generic_linux_apps("snap", search_term, "snap", "sudo snap install {}")
+
+
+def get_apt_apps(search_term=None):
+    return get_generic_linux_apps("apt", search_term, "apt", "sudo apt install -y {}")
+
+
+def get_dnf_apps(search_term=None):
+    return get_generic_linux_apps("dnf", search_term, "dnf", "sudo dnf install -y {}")
+
+
+def get_zypper_apps(search_term=None):
+    return get_generic_linux_apps(
+        "zypper", search_term, "zypper", "sudo zypper install -y {}"
+    )
+
+
+def get_appimage_apps(search_term=None):
+    """Fetch apps that are available as AppImages (mock for now)."""
+    # In a real impl, we'd query appimage.github.io or similar
+    if not search_term:
+        return []
+    return []
 
 
 def get_all_available_apps(search_term=None):
     """Fetch apps from all available sources in parallel and merge them."""
     all_apps = []
 
-    # List of search functions to run
     search_funcs = [
         ("Flatpak", get_flatpak_apps),
         ("Pacman", get_pacman_apps),
         ("Yay", get_yay_apps),
         ("Docker", get_docker_apps),
         ("Custom", get_custom_build_apps),
+        ("Snap", get_snap_apps),
+        ("APT", get_apt_apps),
+        ("DNF", get_dnf_apps),
+        ("Zypper", get_zypper_apps),
+        ("AppImage", get_appimage_apps),
     ]
 
     with ThreadPoolExecutor(max_workers=len(search_funcs)) as executor:
@@ -630,15 +956,19 @@ def get_all_available_apps(search_term=None):
             executor.submit(func, search_term): source for source, func in search_funcs
         }
 
-        for future in as_completed(future_to_source):
-            source = future_to_source[future]
-            try:
-                results = future.result()
-                if results:
-                    print(f"[{source}] Found {len(results)} results", flush=True)
-                    all_apps.extend(results)
-            except Exception as e:
-                print(f"[{source}] Search failed: {e}", flush=True)
+        # Use a timeout for the entire set of parallel tasks
+        try:
+            for future in as_completed(future_to_source, timeout=15):
+                source = future_to_source[future]
+                try:
+                    results = future.result()
+                    if results:
+                        print(f"[{source}] Found {len(results)} results", flush=True)
+                        all_apps.extend(results)
+                except Exception as e:
+                    print(f"[{source}] Search failed: {e}", flush=True)
+        except Exception as e:
+            print(f"Parallel search timeout or error: {e}", flush=True)
 
     # Remove duplicates based on app id (keeping first occurrence)
     seen_ids = set()
@@ -661,12 +991,22 @@ def search_apps():
     data = request.json or {}
     query_str = data.get("query", "")
     target_os = data.get("os", "linux").lower()
-    print(f"Query received: '{query_str}' for OS: {target_os}", flush=True)
+    api_key = data.get("api_key")  # Support BYOK
+    provider = data.get("provider")  # Optional: "groq", "openai", "anthropic", etc.
+    model_override = data.get("model")  # Optional: explicit model
+
+    print(
+        f"Query received: '{query_str}' for OS: {target_os} (BYOK: {bool(api_key)})",
+        flush=True,
+    )
+
+    # Get AI config using LiteLLM (handles both BYOK and default providers)
+    model, api_kwargs = get_ai_config(api_key, provider, model_override)
 
     # Fetch apps from ALL available sources dynamically
     all_apps = get_all_available_apps(query_str if query_str else None)
 
-    # Adapt commands for target OS if not Linux
+    # ... existing command adaptation logic ...
     if target_os != "linux":
         for app in all_apps:
             if target_os == "windows":
@@ -679,21 +1019,15 @@ def search_apps():
                 app["source"] = "Homebrew"
 
     # Limit to a reasonable number to avoid overwhelming the AI
-    # Take first 20 apps or all if less than 20
-    registry_to_search = all_apps[:20] if len(all_apps) > 20 else all_apps
-    print(
-        f"Total apps from all sources: {len(all_apps)}, searching with AI on: {len(registry_to_search)}",
-        flush=True,
-    )
+    registry_to_search = all_apps[:100] if len(all_apps) > 100 else all_apps
 
     if MOCK:
-        print("MOCK mode: Returning sampled registry")
         return jsonify(
             {"intent": "mock_search", "category": "all", "results": registry_to_search}
         )
 
-    if not client:
-        print("Warning: OPENAI_API_KEY not set. Using fallback keyword search.")
+    if not model:
+        print("Warning: No AI model available. Using fallback keyword search.")
         q_lower = query_str.lower()
         results = [
             app
@@ -702,96 +1036,84 @@ def search_apps():
             or q_lower in app["category"].lower()
             or q_lower in app["description"].lower()
         ]
-
-        if not results:
-            # Fallback logic - return a few apps if no matches
-            if len(registry_to_search) > 0:
-                results = registry_to_search[
-                    : min(5, len(registry_to_search))
-                ]  # Return first few apps
-            else:
-                results = []
-
         return jsonify(
-            {"intent": "fallback_search", "category": "unknown", "results": results}
+            {
+                "intent": "fallback_search",
+                "category": "unknown",
+                "results": results[:20],
+            }
         )
 
     try:
-        # Build a simplified registry description for the AI prompt
+        # Build registry description
         registry_apps_text = ""
         for i, app in enumerate(registry_to_search):
             source_info = (
                 f" [{app.get('source', 'unknown')}]" if "source" in app else ""
             )
-            build_info = " (BUILD REQUIRED)" if app.get("build_required") else ""
-            registry_apps_text += f'- id: "{app["id"]}", name: "{app["name"]}", category: "{app["category"]}", description: "{app["description"][:100]}..."{source_info}{build_info}\n'
+            registry_apps_text += f'- id: "{app["id"]}", name: "{app["name"]}", category: "{app["category"]}", description: "{app["description"][:100]}..."{source_info}\n'
 
-        system_prompt = f"""
-        You are the AI brain for a next-generation App Store that has access to multiple software sources including:
-        - Official repositories (Flatpak, Arch PACMAN)
-        - Community repositories (AUR/YAY)
-        - Container platforms (Docker Hub)
-        - Source-build applications (GitHub projects)
-        - And more...
+        system_prompt = f'You are the AI engine for a high-end Linux App Store.\nIdentify matching apps from this registry:\n{registry_apps_text}\nRespond in JSON: {{"intent": "search", "category": "string", "matched_app_ids": []}}'
 
-        You receive a user's natural language query and must extract their intent and desired software category.
-        Also, you must recommend the BEST app ID from the provided registry that matches their need.
-
-        AVAILABLE REGISTRY APPS (showing first {len(registry_to_search)} apps from multiple sources):
-        {registry_apps_text}
-
-        Respond with ONLY a JSON object containing:
-        {{
-            "intent": "install" | "search",
-            "category": "string (the general category of software)",
-            "matched_app_ids": ["string (the id of the best matching apps)"]
-        }}
-        """
-
-        response = client.chat.completions.create(
-            model=MODEL,
+        # Use unified LiteLLM completion (works with 100+ providers)
+        response = ai_complete(
+            model=model,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": query_str},
             ],
+            api_kwargs=api_kwargs,
             response_format={"type": "json_object"},
+            timeout=15.0,
         )
 
         ai_response = json.loads(response.choices[0].message.content)
+        ai_matched_ids = ai_response.get("matched_app_ids", [])
 
-        matched_apps = []
-        if "matched_app_ids" in ai_response:
-            for app_id in ai_response["matched_app_ids"]:
-                for app in registry_to_search:
-                    if app["id"] == app_id:
-                        matched_apps.append(app)
-                        break
+        # 1. Start with AI matches (Highest Priority)
+        final_results = []
+        seen_ids = set()
 
-        if not matched_apps:
-            # Fallback to keyword search if LLM returns no matches
-            q_lower = query_str.lower()
-            keyword_results = [
-                app
-                for app in registry_to_search
-                if q_lower in app["name"].lower()
-                or q_lower in app["category"].lower()
+        for app_id in ai_matched_ids:
+            for app in registry_to_search:
+                if app["id"] == app_id and app_id not in seen_ids:
+                    assets = get_app_assets(app["id"], app["name"])
+                    app["icon_url"] = assets["icon"]
+                    app["hero_image"] = assets["hero"]
+                    final_results.append(app)
+                    seen_ids.add(app_id)
+                    break
+
+        # 2. SUPPLEMENT with all keyword matches (Ensures zero missing apps)
+        q_lower = query_str.lower()
+        keyword_matches = [
+            app
+            for app in registry_to_search
+            if (
+                q_lower in app["name"].lower()
                 or q_lower in app["description"].lower()
-            ]
-            if keyword_results:
-                matched_apps = keyword_results
-            else:
-                # If still no matches, return a sample of apps
-                matched_apps = (
-                    registry_to_search[: min(5, len(registry_to_search))]
-                    if registry_to_search
-                    else []
-                )
+                or q_lower in app["category"].lower()
+            )
+            and app["id"] not in seen_ids
+        ]
+
+        # Enrich keyword matches with assets
+        for app in keyword_matches:
+            assets = get_app_assets(app["id"], app["name"])
+            app["icon_url"] = assets["icon"]
+            app["hero_image"] = assets["hero"]
+            final_results.append(app)
+            seen_ids.add(app["id"])
+
+        # 3. Last Resort: If still empty, give a sample
+        if not final_results and len(registry_to_search) > 0:
+            final_results = registry_to_search[:15]
 
         return jsonify(
             {
                 "intent": ai_response.get("intent", "search"),
                 "category": ai_response.get("category", "unknown"),
-                "results": matched_apps,
+                "results": final_results,
             }
         )
 
@@ -862,6 +1184,7 @@ def get_system_info():
         return jsonify({"error": str(e)})
 
 
+@app.route("/api/v1/system/apps", methods=["GET"])
 @app.route("/api/v1/installed", methods=["GET"])
 def get_installed_apps():
     """Get all installed applications from all available sources."""
@@ -1085,7 +1408,7 @@ def get_storage_info():
 def get_featured_collections():
     """Return trending, spotlight, and category-specific apps based on OS."""
     target_os = request.args.get("os", "linux").lower()
-    
+
     def get_cmd(app_id, linux_cmd, win_id=None, mac_id=None):
         if target_os == "windows" and win_id:
             return f"winget install --id {win_id} --silent --accept-source-agreements"
@@ -1102,7 +1425,9 @@ def get_featured_collections():
             "category": "Media Player",
             "icon_url": "https://api.dicebear.com/7.x/identicon/svg?seed=vlc&backgroundColor=030303",
             "hero_image": "https://images.unsplash.com/photo-1594909122845-11baa439b7bf?q=80&w=800",
-            "install_command": get_cmd("vlc", "flatpak install flathub org.videolan.VLC", "VideoLAN.VLC", "vlc"),
+            "install_command": get_cmd(
+                "vlc", "flatpak install flathub org.videolan.VLC", "VideoLAN.VLC", "vlc"
+            ),
             "source": "Official",
             "install_tier": 1,
             "rating": 4.9,
@@ -1116,7 +1441,12 @@ def get_featured_collections():
             "category": "Web Browser",
             "icon_url": "https://api.dicebear.com/7.x/identicon/svg?seed=firefox&backgroundColor=030303",
             "hero_image": "https://images.unsplash.com/photo-1512941937669-90a1b58e7e9c?q=80&w=800",
-            "install_command": get_cmd("firefox", "flatpak install flathub org.mozilla.firefox", "Mozilla.Firefox", "firefox"),
+            "install_command": get_cmd(
+                "firefox",
+                "flatpak install flathub org.mozilla.firefox",
+                "Mozilla.Firefox",
+                "firefox",
+            ),
             "source": "Official",
             "install_tier": 1,
             "rating": 4.7,
@@ -1130,7 +1460,12 @@ def get_featured_collections():
             "category": "Development",
             "icon_url": "https://api.dicebear.com/7.x/identicon/svg?seed=vscode&backgroundColor=030303",
             "hero_image": "https://images.unsplash.com/photo-1542831371-29b0f74f9713?q=80&w=800",
-            "install_command": get_cmd("vscode", "flatpak install flathub com.visualstudio.code", "Microsoft.VisualStudioCode", "visual-studio-code"),
+            "install_command": get_cmd(
+                "vscode",
+                "flatpak install flathub com.visualstudio.code",
+                "Microsoft.VisualStudioCode",
+                "visual-studio-code",
+            ),
             "source": "Official",
             "install_tier": 1,
             "rating": 4.8,
@@ -1147,7 +1482,12 @@ def get_featured_collections():
             "category": "Gaming",
             "icon_url": "https://api.dicebear.com/7.x/identicon/svg?seed=steam&backgroundColor=030303",
             "hero_image": "https://images.unsplash.com/photo-1580234797602-22c37b2a6230?q=80&w=800",
-            "install_command": get_cmd("steam", "flatpak install flathub com.valvesoftware.Steam", "Valve.Steam", "steam"),
+            "install_command": get_cmd(
+                "steam",
+                "flatpak install flathub com.valvesoftware.Steam",
+                "Valve.Steam",
+                "steam",
+            ),
             "source": "Official",
             "install_tier": 1,
             "rating": 4.9,
@@ -1161,7 +1501,12 @@ def get_featured_collections():
             "category": "Gaming",
             "icon_url": "https://api.dicebear.com/7.x/identicon/svg?seed=stk&backgroundColor=030303",
             "hero_image": "https://images.unsplash.com/photo-1511512578047-dfb367046420?q=80&w=800",
-            "install_command": get_cmd("stk", "flatpak install flathub org.supertuxkart.SuperTuxKart", "STK.SuperTuxKart", "supertuxkart"),
+            "install_command": get_cmd(
+                "stk",
+                "flatpak install flathub org.supertuxkart.SuperTuxKart",
+                "STK.SuperTuxKart",
+                "supertuxkart",
+            ),
             "source": "Official",
             "install_tier": 1,
             "rating": 4.5,
@@ -1178,7 +1523,12 @@ def get_featured_collections():
             "category": "Productivity",
             "icon_url": "https://api.dicebear.com/7.x/identicon/svg?seed=libreoffice&backgroundColor=030303",
             "hero_image": "https://images.unsplash.com/photo-1497032628192-86f99bcd76bc?q=80&w=800",
-            "install_command": get_cmd("libreoffice", "flatpak install flathub org.libreoffice.LibreOffice", "TheDocumentFoundation.LibreOffice", "libreoffice"),
+            "install_command": get_cmd(
+                "libreoffice",
+                "flatpak install flathub org.libreoffice.LibreOffice",
+                "TheDocumentFoundation.LibreOffice",
+                "libreoffice",
+            ),
             "source": "Official",
             "install_tier": 1,
             "rating": 4.6,
@@ -1192,7 +1542,12 @@ def get_featured_collections():
             "category": "Productivity",
             "icon_url": "https://api.dicebear.com/7.x/identicon/svg?seed=obsidian&backgroundColor=030303",
             "hero_image": "https://images.unsplash.com/photo-1455390582262-044cdead277a?q=80&w=800",
-            "install_command": get_cmd("obsidian", "flatpak install flathub md.obsidian.Obsidian", "Obsidian.Obsidian", "obsidian"),
+            "install_command": get_cmd(
+                "obsidian",
+                "flatpak install flathub md.obsidian.Obsidian",
+                "Obsidian.Obsidian",
+                "obsidian",
+            ),
             "source": "Official",
             "install_tier": 1,
             "rating": 4.9,
@@ -1209,7 +1564,9 @@ def get_featured_collections():
             "category": "Education",
             "icon_url": "https://api.dicebear.com/7.x/identicon/svg?seed=anki&backgroundColor=030303",
             "hero_image": "https://images.unsplash.com/photo-1456513080510-7bf3a84b82f8?q=80&w=800",
-            "install_command": get_cmd("anki", "flatpak install flathub net.ankiweb.Anki", "Anki.Anki", "anki"),
+            "install_command": get_cmd(
+                "anki", "flatpak install flathub net.ankiweb.Anki", "Anki.Anki", "anki"
+            ),
             "source": "Official",
             "install_tier": 1,
             "rating": 4.8,
@@ -1223,7 +1580,12 @@ def get_featured_collections():
             "category": "Education",
             "icon_url": "https://api.dicebear.com/7.x/identicon/svg?seed=stellarium&backgroundColor=030303",
             "hero_image": "https://images.unsplash.com/photo-1446776811953-b23d57bd21aa?q=80&w=800",
-            "install_command": get_cmd("stellarium", "flatpak install flathub org.stellarium.Stellarium", "Stellarium.Stellarium", "stellarium"),
+            "install_command": get_cmd(
+                "stellarium",
+                "flatpak install flathub org.stellarium.Stellarium",
+                "Stellarium.Stellarium",
+                "stellarium",
+            ),
             "source": "Official",
             "install_tier": 1,
             "rating": 4.9,
@@ -1280,14 +1642,16 @@ def get_featured_collections():
         },
     ]
 
-    return jsonify({
-        "trending": trending, 
-        "games": games,
-        "productivity": productivity,
-        "education": education,
-        "spotlight": spotlight, 
-        "our_apps": our_apps
-    })
+    return jsonify(
+        {
+            "trending": trending,
+            "games": games,
+            "productivity": productivity,
+            "education": education,
+            "spotlight": spotlight,
+            "our_apps": our_apps,
+        }
+    )
 
 
 # Global settings for sources (would be persisted in a DB/JSON in real production)
@@ -1299,61 +1663,17 @@ USER_SOURCES = {
 }
 
 
-@app.route("/api/v1/system/apps", methods=["GET"])
-def get_installed_system_apps():
-    """Scan the OS for all installed applications from all sources."""
-    installed = []
-
-    # 1. Scan Flatpaks
-    try:
-        res = subprocess.run(
-            ["flatpak", "list", "--columns=name,application,version"],
-            capture_output=True,
-            text=True,
-        )
-        if res.returncode == 0:
-            for line in res.stdout.strip().split("\n"):
-                parts = line.split("\t")
-                if len(parts) >= 2:
-                    installed.append(
-                        {
-                            "name": parts[0],
-                            "id": parts[1],
-                            "source": "flatpak",
-                            "version": parts[2] if len(parts) > 2 else "unknown",
-                            "type": "appztore",
-                        }
-                    )
-    except:
-        pass
-
-    # 2. Scan Native Pacman
-    try:
-        res = subprocess.run(["pacman", "-Q"], capture_output=True, text=True)
-        if res.returncode == 0:
-            for line in res.stdout.strip().split("\n")[:100]:  # Limit for performance
-                parts = line.split(" ")
-                if len(parts) >= 2:
-                    installed.append(
-                        {
-                            "name": parts[0],
-                            "id": parts[0],
-                            "source": "pacman",
-                            "version": parts[1],
-                            "type": "system",
-                        }
-                    )
-    except:
-        pass
-
-    return jsonify({"apps": installed})
-
-
 @app.route("/api/v1/install/insight", methods=["POST"])
 def get_install_insight():
     """AI provides insight and potential issues for a specific installation."""
     data = request.json or {}
     app_id = data.get("app_id", "")
+    api_key = data.get("api_key")
+    provider = data.get("provider")
+    model_override = data.get("model")
+
+    # Get AI config using LiteLLM
+    model, api_kwargs = get_ai_config(api_key, provider, model_override)
 
     prompt = f"""
     Analyze the installation of '{app_id}'.
@@ -1367,7 +1687,7 @@ def get_install_insight():
     }}
     """
 
-    if not client:
+    if not model:
         return jsonify(
             {
                 "insights": ["Standard installation process"],
@@ -1375,12 +1695,13 @@ def get_install_insight():
             }
         )
 
-    response = client.chat.completions.create(
-        model=MODEL,
+    response = ai_complete(
+        model=model,
         messages=[
             {"role": "system", "content": "You are a Linux System Expert."},
             {"role": "user", "content": prompt},
         ],
+        api_kwargs=api_kwargs,
         response_format={"type": "json_object"},
     )
     return response.choices[0].message.content
@@ -1393,9 +1714,17 @@ def analyze_install_error():
     app_id = data.get("app_id", "")
     command = data.get("command", "")
     error_logs = data.get("logs", "")
+    api_key = data.get("api_key")
+    provider = data.get("provider")
+    model_override = data.get("model")
 
-    if not client:
-        return jsonify({"analysis": "Manual verification required.", "fix_suggestion": None})
+    # Get AI config using LiteLLM
+    model, api_kwargs = get_ai_config(api_key, provider, model_override)
+
+    if not model:
+        return jsonify(
+            {"analysis": "Manual verification required.", "fix_suggestion": None}
+        )
 
     prompt = f"""
     The installation of '{app_id}' failed.
@@ -1417,12 +1746,16 @@ def analyze_install_error():
     }}
     """
 
-    response = client.chat.completions.create(
-        model=MODEL,
+    response = ai_complete(
+        model=model,
         messages=[
-            {"role": "system", "content": "You are an expert Linux System Troubleshooter."},
+            {
+                "role": "system",
+                "content": "You are an expert Linux System Troubleshooter.",
+            },
             {"role": "user", "content": prompt},
         ],
+        api_kwargs=api_kwargs,
         response_format={"type": "json_object"},
     )
     return response.choices[0].message.content
@@ -1440,7 +1773,7 @@ def verify_installation():
         "installed": False,
         "method": "unknown",
         "binary_path": None,
-        "version": None
+        "version": None,
     }
 
     # 1. Check common binary paths
@@ -1461,7 +1794,10 @@ def verify_installation():
                 verification_results["installed"] = True
                 verification_results["method"] = "flatpak_registry"
         elif "arch" in source or "aur" in source:
-            res = subprocess.run(["pacman", "-Qi", name.split(":")[ -1 ] if ":" in name else name], capture_output=True)
+            res = subprocess.run(
+                ["pacman", "-Qi", name.split(":")[-1] if ":" in name else name],
+                capture_output=True,
+            )
             if res.returncode == 0:
                 verification_results["installed"] = True
                 verification_results["method"] = "pacman_registry"
