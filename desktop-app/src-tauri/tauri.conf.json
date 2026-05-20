@@ -1,8 +1,8 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "appztore",
-  "version": "0.1.0",
-  "identifier": "com.appztore.app",
+  "version": "1.0.0",
+  "identifier": "com.appztore.desktop",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:5173",
@@ -30,7 +30,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["deb", "rpm", "appimage"],
     "category": "Utility",
     "shortDescription": "AI-Powered App Store for Linux",
     "longDescription": "Appztore is a next-generation app store leveraging AI to discover and install applications from various backends like Flathub.",

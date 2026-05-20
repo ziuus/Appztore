@@ -4,15 +4,60 @@ import os
 import platform
 import re
 import subprocess
+import time
+from functools import lru_cache, wraps
+from threading import Lock
 
 from dotenv import load_dotenv
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from flask import Flask, jsonify, request
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
+from flask import Flask, jsonify, request, Response
 from flask_cors import CORS
 import litellm
 from litellm import completion
 
 load_dotenv()
+
+# Simple in-memory cache with TTL
+_cache_lock = Lock()
+_result_cache = {}  # key: (func_name, args_tuple), value: (result, timestamp)
+CACHE_TTL_SECONDS = 120  # 2 minutes
+
+
+def cached_with_ttl(ttl_seconds=CACHE_TTL_SECONDS):
+    """Decorator to cache function results with TTL."""
+
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            # Create a cache key from function name and args
+            key = (func.__name__, str(args), str(sorted(kwargs.items())))
+
+            with _cache_lock:
+                # Check if cached and not expired
+                if key in _result_cache:
+                    result, timestamp = _result_cache[key]
+                    if time.time() - timestamp < ttl_seconds:
+                        return result
+
+            # Call the function
+            result = func(*args, **kwargs)
+
+            with _cache_lock:
+                _result_cache[key] = (result, time.time())
+
+            return result
+
+        return wrapper
+
+    return decorator
+
+
+def clear_cache():
+    """Clear the search cache."""
+    global _result_cache
+    with _cache_lock:
+        _result_cache = {}
+
 
 # Configure LiteLLM to not send telemetry
 litellm.telemetry = False
@@ -478,6 +523,7 @@ def get_app_assets(app_id, name):
     }
 
 
+@cached_with_ttl(ttl_seconds=180)  # 3 minutes cache for flatpak (slow network call)
 def get_flatpak_apps(search_term=None):
     """Fetch apps from Flathub using flatpak search command."""
     try:
@@ -487,7 +533,9 @@ def get_flatpak_apps(search_term=None):
         else:
             cmd.append("editor")
 
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=10
+        )  # Increased: 3s -> 10s
         if result.returncode != 0:
             return []
 
@@ -542,6 +590,7 @@ def get_system_icon(name):
     return f"https://api.dicebear.com/7.x/initials/svg?seed={encoded_name}&backgroundColor=030303&fontSize=45&fontFamily=Arial"
 
 
+@cached_with_ttl(ttl_seconds=120)
 def get_pacman_apps(search_term=None):
     """Fetch applications from Arch Linux official repositories."""
     try:
@@ -551,7 +600,9 @@ def get_pacman_apps(search_term=None):
         else:
             cmd = ["pacman", "-Ssq"]
 
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=8)
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=5
+        )  # 8s -> 5s
         if result.returncode != 0:
             return []
 
@@ -634,6 +685,7 @@ def get_system_icon(name):
     return f"https://api.dicebear.com/7.x/identicon/svg?seed={encoded_name}&backgroundColor=030303"
 
 
+@cached_with_ttl(ttl_seconds=120)
 def get_yay_apps(search_term=None):
     """Fetch applications from Arch User Repository (AUR) via yay."""
     try:
@@ -643,7 +695,9 @@ def get_yay_apps(search_term=None):
         else:
             return get_popular_aur_apps()
 
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=8
+        )  # 20s -> 8s
         if result.returncode != 0:
             return []
 
@@ -933,16 +987,40 @@ def get_appimage_apps(search_term=None):
     return []
 
 
-def get_all_available_apps(search_term=None):
-    """Fetch apps from all available sources in parallel and merge them."""
-    all_apps = []
-
-    search_funcs = [
-        ("Flatpak", get_flatpak_apps),
+def get_fast_apps(search_term=None):
+    """Fetch apps from fast, local-first sources in parallel."""
+    fast_funcs = [
         ("Pacman", get_pacman_apps),
         ("Yay", get_yay_apps),
         ("Docker", get_docker_apps),
         ("Custom", get_custom_build_apps),
+    ]
+
+    apps = []
+    with ThreadPoolExecutor(max_workers=len(fast_funcs)) as executor:
+        future_to_source = {
+            executor.submit(func, search_term): source for source, func in fast_funcs
+        }
+        try:
+            for future in as_completed(future_to_source, timeout=4):
+                source = future_to_source[future]
+                try:
+                    results = future.result()
+                    if results:
+                        logger.info(f"[{source}] Found {len(results)} fast results")
+                        apps.extend(results)
+                except Exception as e:
+                    logger.error(f"[{source}] Fast search failed: {e}")
+        except Exception as e:
+            logger.error(f"Fast parallel search timeout or error: {e}")
+
+    return apps
+
+
+def get_slow_apps(search_term=None):
+    """Fetch apps from slow, network-dependent sources, yielding results as they complete."""
+    slow_funcs = [
+        ("Flatpak", get_flatpak_apps),
         ("Snap", get_snap_apps),
         ("APT", get_apt_apps),
         ("DNF", get_dnf_apps),
@@ -950,27 +1028,31 @@ def get_all_available_apps(search_term=None):
         ("AppImage", get_appimage_apps),
     ]
 
-    with ThreadPoolExecutor(max_workers=len(search_funcs)) as executor:
-        # Submit all tasks
+    with ThreadPoolExecutor(max_workers=len(slow_funcs)) as executor:
         future_to_source = {
-            executor.submit(func, search_term): source for source, func in search_funcs
+            executor.submit(func, search_term): source for source, func in slow_funcs
         }
-
-        # Use a timeout for the entire set of parallel tasks
         try:
             for future in as_completed(future_to_source, timeout=15):
                 source = future_to_source[future]
                 try:
                     results = future.result()
                     if results:
-                        print(f"[{source}] Found {len(results)} results", flush=True)
-                        all_apps.extend(results)
+                        logger.info(f"[{source}] Found {len(results)} slow results")
+                        yield results  # Yield results as soon as they are ready
                 except Exception as e:
-                    print(f"[{source}] Search failed: {e}", flush=True)
+                    logger.error(f"[{source}] Slow search failed: {e}")
         except Exception as e:
-            print(f"Parallel search timeout or error: {e}", flush=True)
+            logger.error(f"Slow parallel search timeout or error: {e}")
 
-    # Remove duplicates based on app id (keeping first occurrence)
+
+def get_all_available_apps(search_term=None):
+    """DEPRECATED: Use get_fast_apps and get_slow_apps instead."""
+    # This function is kept for reference but should not be used directly for new search logic.
+    # The new two-stage search provides a better user experience.
+    all_apps = get_fast_apps(search_term) + list(get_slow_apps(search_term))
+
+    # Remove duplicates
     seen_ids = set()
     unique_apps = []
     for app in all_apps:
@@ -984,153 +1066,154 @@ def get_all_available_apps(search_term=None):
 # Initialize AI client
 @app.route("/api/v1/search", methods=["POST"])
 def search_apps():
+    """
+    New Two-Stage Search:
+    1. Immediately returns fast, local results.
+    2. Initiates a background task for slower, network-based searches.
+    3. The frontend will use a separate streaming endpoint to get the slow results.
+    """
     auth_err = _require_auth()
     if auth_err:
         return auth_err
-    print("=== SEARCH ENDPOINT HIT ===", flush=True)
+
     data = request.json or {}
     query_str = data.get("query", "")
     target_os = data.get("os", "linux").lower()
-    api_key = data.get("api_key")  # Support BYOK
-    provider = data.get("provider")  # Optional: "groq", "openai", "anthropic", etc.
-    model_override = data.get("model")  # Optional: explicit model
 
-    print(
-        f"Query received: '{query_str}' for OS: {target_os} (BYOK: {bool(api_key)})",
-        flush=True,
-    )
+    print(f"Fast search started for: '{query_str}'", flush=True)
 
-    # Get AI config using LiteLLM (handles both BYOK and default providers)
+    # --- Stage 1: Get Fast, Local Results ---
+    fast_apps = get_fast_apps(query_str if query_str else None)
+
+    # Remove duplicates
+    seen_ids = set()
+    unique_fast_apps = []
+    for app in fast_apps:
+        if app["id"] not in seen_ids:
+            seen_ids.add(app["id"])
+            unique_fast_apps.append(app)
+
+    # --- AI Ranking for Fast Results ---
+    api_key = data.get("api_key")
+    provider = data.get("provider")
+    model_override = data.get("model")
     model, api_kwargs = get_ai_config(api_key, provider, model_override)
 
-    # Fetch apps from ALL available sources dynamically
-    all_apps = get_all_available_apps(query_str if query_str else None)
+    final_results = unique_fast_apps
+    intent = "fast_search"
+    category = "unknown"
 
-    # ... existing command adaptation logic ...
-    if target_os != "linux":
-        for app in all_apps:
-            if target_os == "windows":
-                win_id = app["id"].split(".")[-1]
-                app["install_command"] = f"winget install {win_id} --silent"
-                app["source"] = "WinGet"
-            elif target_os == "macos":
-                mac_id = app["id"].split(".")[-1].lower()
-                app["install_command"] = f"brew install {mac_id}"
-                app["source"] = "Homebrew"
+    if model and unique_fast_apps:
+        try:
+            registry_apps_text = ""
+            for app in unique_fast_apps:
+                registry_apps_text += f'- id: "{app["id"]}", name: "{app["name"]}", category: "{app["category"]}", description: "{app["description"][:100]}..."\n'
 
-    # Limit to a reasonable number to avoid overwhelming the AI
-    registry_to_search = all_apps[:100] if len(all_apps) > 100 else all_apps
+            system_prompt = f'You are an AI App Store engine. Rank apps from this registry for the query "{query_str}". Respond in JSON: {{"intent": "search", "category": "string", "matched_app_ids": []}}'
 
-    if MOCK:
-        return jsonify(
-            {"intent": "mock_search", "category": "all", "results": registry_to_search}
-        )
-
-    if not model:
-        print("Warning: No AI model available. Using fallback keyword search.")
-        q_lower = query_str.lower()
-        results = [
-            app
-            for app in registry_to_search
-            if q_lower in app["name"].lower()
-            or q_lower in app["category"].lower()
-            or q_lower in app["description"].lower()
-        ]
-        return jsonify(
-            {
-                "intent": "fallback_search",
-                "category": "unknown",
-                "results": results[:20],
-            }
-        )
-
-    try:
-        # Build registry description
-        registry_apps_text = ""
-        for i, app in enumerate(registry_to_search):
-            source_info = (
-                f" [{app.get('source', 'unknown')}]" if "source" in app else ""
+            response = ai_complete(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": query_str},
+                ],
+                api_kwargs=api_kwargs,
+                response_format={"type": "json_object"},
+                timeout=10.0,
             )
-            registry_apps_text += f'- id: "{app["id"]}", name: "{app["name"]}", category: "{app["category"]}", description: "{app["description"][:100]}..."{source_info}\n'
 
-        system_prompt = f'You are the AI engine for a high-end Linux App Store.\nIdentify matching apps from this registry:\n{registry_apps_text}\nRespond in JSON: {{"intent": "search", "category": "string", "matched_app_ids": []}}'
+            ai_response = json.loads(response.choices[0].message.content)
+            ai_matched_ids = ai_response.get("matched_app_ids", [])
 
-        # Use unified LiteLLM completion (works with 100+ providers)
-        response = ai_complete(
-            model=model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": query_str},
-            ],
-            api_kwargs=api_kwargs,
-            response_format={"type": "json_object"},
-            timeout=15.0,
-        )
+            # Create a ranked list
+            ranked_apps = []
+            seen_ranked_ids = set()
+            for app_id in ai_matched_ids:
+                for app in unique_fast_apps:
+                    if app["id"] == app_id and app_id not in seen_ranked_ids:
+                        ranked_apps.append(app)
+                        seen_ranked_ids.add(app_id)
+                        break
 
-        ai_response = json.loads(response.choices[0].message.content)
-        ai_matched_ids = ai_response.get("matched_app_ids", [])
+            # Add remaining unranked apps
+            for app in unique_fast_apps:
+                if app["id"] not in seen_ranked_ids:
+                    ranked_apps.append(app)
 
-        # 1. Start with AI matches (Highest Priority)
-        final_results = []
-        seen_ids = set()
+            final_results = ranked_apps
+            intent = ai_response.get("intent", "ranked_search")
+            category = ai_response.get("category", "unknown")
 
-        for app_id in ai_matched_ids:
-            for app in registry_to_search:
-                if app["id"] == app_id and app_id not in seen_ids:
-                    assets = get_app_assets(app["id"], app["name"])
-                    app["icon_url"] = assets["icon"]
-                    app["hero_image"] = assets["hero"]
-                    final_results.append(app)
-                    seen_ids.add(app_id)
-                    break
+        except Exception as e:
+            logger.error(f"AI ranking for fast results failed: {e}")
 
-        # 2. SUPPLEMENT with all keyword matches (Ensures zero missing apps)
-        q_lower = query_str.lower()
-        keyword_matches = [
-            app
-            for app in registry_to_search
-            if (
-                q_lower in app["name"].lower()
-                or q_lower in app["description"].lower()
-                or q_lower in app["category"].lower()
+    return jsonify(
+        {
+            "intent": intent,
+            "category": category,
+            "results": final_results,
+            "search_phase": "fast",
+        }
+    )
+
+
+@app.route("/api/v1/search/stream", methods=["GET"])
+def search_stream():
+    """
+    SSE endpoint to stream results from slow, network-based searches.
+    Reads parameters from the query string.
+    """
+    query_str = request.args.get("query", "")
+    # os = request.args.get("os", "linux") # os is not used in get_slow_apps
+    # api_key = request.args.get("api_key") # api_key is not used in get_slow_apps
+    # provider = request.args.get("provider") # provider is not used in get_slow_apps
+    # model = request.args.get("model") # model is not used in get_slow_apps
+
+    def generate():
+        try:
+            print(f"Background search stream started for: '{query_str}'", flush=True)
+            # get_slow_apps is now a generator
+            for app_batch in get_slow_apps(query_str if query_str else None):
+                if not app_batch:
+                    continue
+
+                # Remove duplicates within the batch
+                seen_ids = set()
+                unique_apps = []
+                for app in app_batch:
+                    if app["id"] not in seen_ids:
+                        seen_ids.add(app["id"])
+                        unique_apps.append(app)
+
+                if unique_apps:
+                    event_data = json.dumps(
+                        {
+                            "intent": "background_search_result",
+                            "category": "various",
+                            "results": unique_apps,
+                            "search_phase": "slow",
+                        }
+                    )
+                    yield f"data: {event_data}\n\n"
+                    print(
+                        f"Sent {len(unique_apps)} slow results from '{unique_apps[0]['source']}' to client.",
+                        flush=True,
+                    )
+
+        except Exception as e:
+            print(f"Error in background search stream: {e}", flush=True)
+            error_data = json.dumps(
+                {"error": "Background search failed", "details": str(e)}
             )
-            and app["id"] not in seen_ids
-        ]
+            yield f"event: error\ndata: {error_data}\n\n"
 
-        # Enrich keyword matches with assets
-        for app in keyword_matches:
-            assets = get_app_assets(app["id"], app["name"])
-            app["icon_url"] = assets["icon"]
-            app["hero_image"] = assets["hero"]
-            final_results.append(app)
-            seen_ids.add(app["id"])
+        # Signal end of stream
+        finally:
+            complete_data = json.dumps({"search_phase": "slow_complete"})
+            yield f"event: complete\ndata: {complete_data}\n\n"
+            print("Background search stream completed.", flush=True)
 
-        # 3. Last Resort: If still empty, give a sample
-        if not final_results and len(registry_to_search) > 0:
-            final_results = registry_to_search[:15]
-
-        return jsonify(
-            {
-                "intent": ai_response.get("intent", "search"),
-                "category": ai_response.get("category", "unknown"),
-                "results": final_results,
-            }
-        )
-
-    except Exception as e:
-        import traceback
-
-        traceback.print_exc()
-        print(f"Error calling LLM: {e}", flush=True)
-        # Fallback to returning some apps on error
-        fallback_apps = (
-            registry_to_search[: min(5, len(registry_to_search))]
-            if registry_to_search
-            else []
-        )
-        return jsonify(
-            {"intent": "error", "category": "error", "results": fallback_apps}
-        )
+    return Response(generate(), mimetype="text/event-stream")
 
 
 @app.route("/api/v1/system/info", methods=["GET"])

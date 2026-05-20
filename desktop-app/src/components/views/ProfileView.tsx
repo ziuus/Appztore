@@ -1,5 +1,5 @@
 import { motion } from "framer-motion";
-import { User as UserIcon, Crown } from "lucide-react";
+import { User as UserIcon } from "lucide-react";
 import { type User as FirebaseUser } from "firebase/auth";
 import { SpotlightButton } from "../shared/SpotlightButton";
 import type { Plan } from "../../types";

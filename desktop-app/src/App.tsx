@@ -53,7 +53,6 @@ export default function App() {
     isSearching,
     results,
     setResults,
-    errorMessage,
     searchHistory,
     handleSearch,
     clearHistory,

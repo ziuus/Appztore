@@ -13,7 +13,6 @@ export const OnboardingView = ({
   onboardingStep,
   setOnboardingStep,
   handleGoogleSignIn,
-  theme,
   setView,
 }: OnboardingViewProps) => {
   return (
