@@ -30,7 +30,6 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["deb", "rpm", "appimage"],
     "category": "Utility",
     "shortDescription": "AI-Powered App Store for Linux",
     "longDescription": "Appztore is a next-generation app store leveraging AI to discover and install applications from various backends like Flathub.",
