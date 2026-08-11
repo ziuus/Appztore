@@ -5,8 +5,11 @@ on:
     tags:
       - 'v*'
 
+permissions:
+  contents: write
+
 jobs:
-  release:
+  build:
     strategy:
       fail-fast: false
       matrix:
@@ -14,39 +17,48 @@ jobs:
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
+
       - name: install dependencies (ubuntu only)
         if: matrix.platform == 'ubuntu-22.04'
         run: |
           sudo apt-get update
           sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
-      
+
       - name: setup pnpm
         uses: pnpm/action-setup@v3
         with:
           version: 10
-          
+
       - name: setup node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
-          cache: 'pnpm'
-          cache-dependency-path: 'desktop-app/pnpm-lock.yaml'
-      
+          node-version: 22
+
       - name: install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install frontend dependencies
-        run: cd desktop-app && pnpm install
-        
+        run: cd desktop-app && pnpm install --no-frozen-lockfile
+
       - name: Build Tauri app
-        uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          NODE_OPTIONS: "--use-system-ca"
+        run: cd desktop-app && pnpm tauri build
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
         with:
-          projectPath: "desktop-app"
-          tagName: "v__VERSION__"
-          releaseName: "Appztore v__VERSION__"
-          releaseBody: "See the assets to download this version and install."
-          releaseDraft: true
-          prerelease: false
+          name: appztore-${{ matrix.platform }}
+          path: desktop-app/src-tauri/target/release/bundle/**
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*
+          generate_release_notes: true
