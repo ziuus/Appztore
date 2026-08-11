@@ -47,7 +47,14 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: appztore-${{ matrix.platform }}
-          path: desktop-app/src-tauri/target/release/bundle/**
+          if-no-files-found: ignore
+          path: |
+            desktop-app/src-tauri/target/release/bundle/deb/*.deb
+            desktop-app/src-tauri/target/release/bundle/rpm/*.rpm
+            desktop-app/src-tauri/target/release/bundle/appimage/*.AppImage
+            desktop-app/src-tauri/target/release/bundle/dmg/*.dmg
+            desktop-app/src-tauri/target/release/bundle/nsis/*.exe
+            desktop-app/src-tauri/target/release/bundle/msi/*.msi
 
   publish:
     needs: build
@@ -60,5 +67,11 @@ jobs:
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/**/*
+          files: |
+            artifacts/**/*.deb
+            artifacts/**/*.rpm
+            artifacts/**/*.AppImage
+            artifacts/**/*.dmg
+            artifacts/**/*.exe
+            artifacts/**/*.msi
           generate_release_notes: true
