@@ -13,18 +13,25 @@ export interface AppResult {
   category: string;
   install_command: string;
   source?: string;
+  registry?: string;
+  package_name?: string;
+  security_score?: number;
   size?: string;
   version?: string;
+  install_tier?: number;
+  is_container?: boolean;
 }
 
 export interface InstallState {
   id: string;
   step: string;
   progress: number;
+  logs?: string[];
+  currentLog?: string;
 }
 
 export interface Category {
   name: string;
-  icon: any; // Lucide icon component
+  icon: any;
   color: string;
 }

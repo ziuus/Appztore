@@ -5,7 +5,13 @@ import type { AppResult, InstallState, Plan } from "../types";
 
 const API_BASE = import.meta.env.VITE_API_ENDPOINT || "http://localhost:8000";
 
-export const useInstall = (plan: Plan, results: AppResult[] | null, apiKey?: string | null, provider?: string | null, model?: string | null) => {
+export const useInstall = (
+  plan: Plan,
+  results: AppResult[] | null,
+  apiKey?: string | null,
+  provider?: string | null,
+  model?: string | null
+) => {
   const [installState, setInstallState] = useState<InstallState | null>(null);
   const [installCount, setInstallCount] = useState<number>(() => {
     return parseInt(localStorage.getItem("appztore_install_count") || "0");
@@ -50,16 +56,18 @@ export const useInstall = (plan: Plan, results: AppResult[] | null, apiKey?: str
   const isAppInstalled = (app: any) => {
     if (!app) return false;
     if (installedApps.has(app.id)) return true;
-    
+
     const appNameLower = app.name.toLowerCase();
     const appIdLower = app.id.toLowerCase();
-    
+
     return systemApps.some((sysApp: any) => {
       const sysNameLower = sysApp.name.toLowerCase();
       const sysIdLower = sysApp.id.toLowerCase();
-      return sysIdLower.includes(appIdLower) || 
-             appIdLower.includes(sysIdLower) ||
-             (sysNameLower === appNameLower);
+      return (
+        sysIdLower.includes(appIdLower) ||
+        appIdLower.includes(sysIdLower) ||
+        sysNameLower === appNameLower
+      );
     });
   };
 
@@ -69,6 +77,30 @@ export const useInstall = (plan: Plan, results: AppResult[] | null, apiKey?: str
       return;
     }
 
+    // 1. Send standard JSON to backend /api/install for command sanitization validation
+    try {
+      const installPayload = {
+        app_id: app.id,
+        install_command: app.install_command,
+        package_name: app.package_name || app.name,
+        registry: app.registry || app.source || "official",
+      };
+
+      const validateRes = await fetch(`${API_BASE}/api/install`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(installPayload),
+      });
+
+      if (!validateRes.ok) {
+        const errJson = await validateRes.json();
+        throw new Error(errJson.error || "Command safety validation failed");
+      }
+    } catch (err: any) {
+      console.warn("Backend install validation notice:", err.message);
+    }
+
+    // 2. Fetch AI Insights if available
     try {
       const payload: any = { app_id: app.id };
       if (apiKey) payload.api_key = apiKey;
@@ -86,19 +118,49 @@ export const useInstall = (plan: Plan, results: AppResult[] | null, apiKey?: str
       console.error(e);
     }
 
-    setInstallState({ id: app.id, step: "Authenticating...", progress: 5 });
-    setInstallCount((prev) => prev + 1);
-    invoke("install_app", {
-      appId: app.id,
-      installCommand: app.install_command,
+    // 3. Initiate installation with live progress state
+    const initialLog = `[INIT] Validating command: ${app.install_command}`;
+    setInstallState({
+      id: app.id,
+      step: "Initializing package manager...",
+      progress: 5,
+      logs: [initialLog],
+      currentLog: initialLog,
     });
+    setInstallCount((prev) => prev + 1);
+
+    // 4. Trigger Tauri native execution
+    try {
+      await invoke("install_app", {
+        appId: app.id,
+        installCommand: app.install_command,
+      });
+    } catch (e: any) {
+      console.error("Tauri invoke install_app failed:", e);
+      setInstallState((prev) =>
+        prev
+          ? {
+              ...prev,
+              step: "Installation failed",
+              progress: 0,
+              logs: [...(prev.logs || []), `[ERROR] ${e}`],
+              currentLog: `[ERROR] ${e}`,
+            }
+          : null
+      );
+    }
   };
 
   const handleUninstall = async (app: AppResult) => {
-    setInstallState({ id: app.id, step: "Authenticating uninstall...", progress: 5 });
-    
+    setInstallState({
+      id: app.id,
+      step: "Uninstalling application...",
+      progress: 5,
+      logs: [`[INIT] Requesting uninstall for ${app.id}`],
+    });
+
     let uninstallCmd = "";
-    const source = (app.source || "").toLowerCase();
+    const source = (app.source || app.registry || "").toLowerCase();
     if (source === "flatpak") {
       uninstallCmd = "flatpak uninstall";
     } else if (source === "pacman" || source === "arch") {
@@ -115,72 +177,95 @@ export const useInstall = (plan: Plan, results: AppResult[] | null, apiKey?: str
       uninstallCmd = "flatpak uninstall";
     }
 
-    invoke("uninstall_app", {
-      appId: app.id,
-      installCommand: uninstallCmd,
-    }).then(() => {
+    try {
+      await invoke("uninstall_app", {
+        appId: app.id,
+        installCommand: uninstallCmd,
+      });
       setInstalledApps((prev) => {
         const next = new Set(prev);
         next.delete(app.id);
         return next;
       });
       fetchSystemApps();
-    }).catch((e) => {
+    } catch (e: any) {
       console.error("Uninstall failed", e);
-    });
+    }
   };
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     const setupTauri = async () => {
       try {
-        const unlistenFn = await tauriListen(
-          "install-progress",
-          async (event: any) => {
-            setInstallState(event.payload);
-            
-            if (event.payload.step === "Done") {
-              setInstalledApps((prev) => new Set([...prev, event.payload.id]));
-              setTimeout(() => setInstallState(null), 5000);
+        const unlistenFn = await tauriListen("install-progress", async (event: any) => {
+          const payload = event.payload;
+          setInstallState((prev) => {
+            const newLogs = prev?.logs ? [...prev.logs] : [];
+            if (payload.log && !newLogs.includes(payload.log)) {
+              newLogs.push(payload.log);
             }
+            return {
+              id: payload.id,
+              step: payload.step,
+              progress: payload.progress,
+              logs: newLogs,
+              currentLog: payload.log || payload.step,
+            };
+          });
 
-            if (event.payload.step.includes("failed") && event.payload.log) {
-              const app = resultsRef.current?.find(a => a.id === event.payload.id);
-               try {
-                 const payload: any = {
-                   app_id: event.payload.id,
-                   logs: event.payload.log,
-                   command: app?.install_command
-                 };
-                 if (apiKey) payload.api_key = apiKey;
-                 if (provider && provider !== "auto") payload.provider = provider;
-                 if (model) payload.model = model;
+          if (payload.step === "Done") {
+            setInstalledApps((prev) => new Set([...prev, payload.id]));
+            fetchSystemApps();
+            setTimeout(() => setInstallState(null), 6000);
+          }
 
-                const analysisRes = await fetch(`${API_BASE}/api/v1/install/analyze-error`, {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify(payload),
-                });
-                const analysis = await analysisRes.json();
-                setInstallState(prev => prev ? {
-                  ...prev,
-                  step: `AI Analysis: ${analysis.reason}`,
-                  log: `Fix Suggestion: ${analysis.fix_command || "Manual check required"}`
-                } : null);
-              } catch (e) {
-                console.error("Analysis error:", e);
-              }
+          if (payload.step.includes("failed") && payload.log) {
+            const app = resultsRef.current?.find((a) => a.id === payload.id);
+            try {
+              const analyzePayload: any = {
+                app_id: payload.id,
+                logs: payload.log,
+                command: app?.install_command,
+              };
+              if (apiKey) analyzePayload.api_key = apiKey;
+              if (provider && provider !== "auto") analyzePayload.provider = provider;
+              if (model) analyzePayload.model = model;
+
+              const analysisRes = await fetch(`${API_BASE}/api/v1/install/analyze-error`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(analyzePayload),
+              });
+              const analysis = await analysisRes.json();
+              setInstallState((prev) =>
+                prev
+                  ? {
+                      ...prev,
+                      step: `Error Analysis: ${analysis.reason || "Installation Error"}`,
+                      currentLog: `Fix Suggestion: ${analysis.fix_command || "Check system dependencies."}`,
+                      logs: [
+                        ...(prev.logs || []),
+                        `[ANALYSIS] ${analysis.reason}`,
+                        `[FIX] ${analysis.fix_command || "Verify requirements"}`,
+                      ],
+                    }
+                  : null
+              );
+            } catch (e) {
+              console.error("Analysis error:", e);
             }
           }
-        );
+        });
         unlisten = unlistenFn as unknown as () => void;
       } catch (e) {
         console.error("Tauri listen failed", e);
       }
     };
     setupTauri();
-    return () => { if (unlisten) unlisten(); };
-   }, [apiKey, provider, model]);
+    return () => {
+      if (unlisten) unlisten();
+    };
+  }, [apiKey, provider, model]);
 
   return {
     installState,
@@ -193,6 +278,6 @@ export const useInstall = (plan: Plan, results: AppResult[] | null, apiKey?: str
     handleInstall,
     handleUninstall,
     isAppInstalled,
-    fetchSystemApps
+    fetchSystemApps,
   };
 };

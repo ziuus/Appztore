@@ -523,11 +523,140 @@ def get_app_assets(app_id, name):
     }
 
 
+COMMAND_SAFE_REGEX = re.compile(r"^[a-zA-Z0-9_\-\.\:\/\s\+=@]+$")
+FORBIDDEN_SHELL_CHARS = re.compile(r"[;&|><`$\n\r()\\]")
+
+
+def validate_command_safety(cmd_str: str) -> bool:
+    """Validate that an installation command contains no dangerous shell injection characters."""
+    if not cmd_str or not isinstance(cmd_str, str):
+        return False
+    if FORBIDDEN_SHELL_CHARS.search(cmd_str):
+        return False
+    return bool(COMMAND_SAFE_REGEX.match(cmd_str.strip()))
+
+
+def normalize_app_object(app: dict) -> dict:
+    """Ensure all package objects returned by the backend have standard, non-null fields."""
+    if not isinstance(app, dict):
+        app = {}
+
+    source = str(app.get("source") or app.get("registry") or "official").lower()
+    name = str(app.get("name") or "Unknown Package").strip()
+    raw_id = str(app.get("id") or "").strip()
+
+    # Extract package_name cleanly
+    pkg_name = app.get("package_name")
+    if not pkg_name:
+        if ":" in raw_id:
+            pkg_name = raw_id.split(":", 1)[1]
+        else:
+            pkg_name = raw_id or name.lower().replace(" ", "-")
+
+    app_id = raw_id or f"{source}:{pkg_name}"
+
+    # Standard security scoring based on source
+    security_score = app.get("security_score")
+    if security_score is None:
+        if source in ["arch", "pacman", "official", "apt", "dnf"]:
+            security_score = 95
+        elif source in ["flatpak"]:
+            security_score = 88
+        elif source in ["aur", "yay"]:
+            security_score = 75
+        elif source in ["snap"]:
+            security_score = 80
+        elif source in ["docker"]:
+            security_score = 72
+        elif source in ["github", "custom"]:
+            security_score = 70
+        else:
+            security_score = 80
+
+    description = (
+        str(app.get("description") or "").strip()
+        or f"{name} application package for Linux."
+    )
+    version = str(app.get("version") or "latest")
+
+    # Get icon / hero assets
+    icon_url = app.get("icon_url")
+    if not icon_url:
+        assets = get_app_assets(app_id, name)
+        icon_url = assets["icon"]
+
+    hero_image = app.get("hero_image")
+    if not hero_image:
+        assets = get_app_assets(app_id, name)
+        hero_image = assets["hero"]
+
+    install_cmd = str(app.get("install_command") or "")
+
+    return {
+        "id": app_id,
+        "name": name,
+        "description": description,
+        "registry": source,
+        "source": source,
+        "package_name": str(pkg_name),
+        "version": version,
+        "icon_url": icon_url,
+        "security_score": int(security_score),
+        "developer": str(app.get("developer") or "Community"),
+        "hero_image": hero_image,
+        "install_command": install_cmd,
+        "category": str(
+            app.get("category") or categorize_app(name, description, app_id)
+        ),
+        "rating": float(app.get("rating") or 4.5),
+        "downloads": str(app.get("downloads") or "10K+"),
+        "install_tier": int(app.get("install_tier") or 1),
+    }
+
+
+def rank_apps_by_keyword(apps: list, query: str) -> list:
+    """Pure OS relevance ranking when LLM is unavailable or unconfigured."""
+    if not query:
+        return [normalize_app_object(a) for a in apps]
+
+    q = query.strip().lower()
+
+    def score_app(app):
+        name = str(app.get("name", "")).lower()
+        pkg = str(app.get("package_name", "")).lower()
+        desc = str(app.get("description", "")).lower()
+        cat = str(app.get("category", "")).lower()
+        sec = int(app.get("security_score", 80))
+
+        score = 0
+        if name == q or pkg == q:
+            score += 100
+        elif name.startswith(q) or pkg.startswith(q):
+            score += 70
+        elif q in name or q in pkg:
+            score += 50
+        elif q in desc:
+            score += 30
+        elif q in cat:
+            score += 20
+
+        score += sec * 0.1
+        return score
+
+    sorted_apps = sorted(apps, key=score_app, reverse=True)
+    return [normalize_app_object(a) for a in sorted_apps]
+
+
 @cached_with_ttl(ttl_seconds=180)  # 3 minutes cache for flatpak (slow network call)
 def get_flatpak_apps(search_term=None):
     """Fetch apps from Flathub using flatpak search command."""
+    import shutil
+
+    if not shutil.which("flatpak"):
+        return []
+
     try:
-        cmd = ["flatpak", "search", "--columns=name,application,description"]
+        cmd = ["flatpak", "search", "--columns=name,application,description,version"]
         if search_term:
             cmd.extend(search_term.split())
         else:
@@ -535,7 +664,7 @@ def get_flatpak_apps(search_term=None):
 
         result = subprocess.run(
             cmd, capture_output=True, text=True, timeout=10
-        )  # Increased: 3s -> 10s
+        )
         if result.returncode != 0:
             return []
 
@@ -550,6 +679,7 @@ def get_flatpak_apps(search_term=None):
             parts = line.split("\t")
             if len(parts) >= 3:
                 name, app_id, description = parts[0], parts[1], parts[2]
+                version = parts[3].strip() if len(parts) > 3 else "latest"
 
                 # Skip runtimes/extensions
                 if any(
@@ -560,20 +690,26 @@ def get_flatpak_apps(search_term=None):
 
                 assets = get_app_assets(app_id, name)
                 apps.append(
-                    {
-                        "id": app_id,
-                        "name": name,
-                        "developer": "Flathub",
-                        "category": categorize_app(name, description, app_id),
-                        "description": description.strip(),
-                        "icon_url": assets["icon"],
-                        "install_tier": 2,
-                        "hero_image": assets["hero"],
-                        "install_command": f"flatpak install -y flathub {app_id}",
-                        "source": "flatpak",
-                        "rating": 4.8,
-                        "downloads": "1M+",
-                    }
+                    normalize_app_object(
+                        {
+                            "id": app_id,
+                            "name": name,
+                            "package_name": app_id,
+                            "version": version,
+                            "developer": "Flathub",
+                            "category": categorize_app(name, description, app_id),
+                            "description": description.strip(),
+                            "icon_url": assets["icon"],
+                            "install_tier": 2,
+                            "hero_image": assets["hero"],
+                            "install_command": f"flatpak install -y flathub {app_id}",
+                            "source": "flatpak",
+                            "registry": "flatpak",
+                            "security_score": 88,
+                            "rating": 4.8,
+                            "downloads": "1M+",
+                        }
+                    )
                 )
         return apps
     except Exception as e:
@@ -586,13 +722,17 @@ def get_system_icon(name):
     from urllib.parse import quote
 
     encoded_name = quote(name)
-    # Using DiceBear as a high-quality fallback that looks like a modern app icon
-    return f"https://api.dicebear.com/7.x/initials/svg?seed={encoded_name}&backgroundColor=030303&fontSize=45&fontFamily=Arial"
+    return f"https://api.dicebear.com/7.x/identicon/svg?seed={encoded_name}&backgroundColor=030303"
 
 
 @cached_with_ttl(ttl_seconds=120)
 def get_pacman_apps(search_term=None):
     """Fetch applications from Arch Linux official repositories."""
+    import shutil
+
+    if not shutil.which("pacman"):
+        return []
+
     try:
         cmd = ["pacman", "-Ss"]
         if search_term:
@@ -602,15 +742,12 @@ def get_pacman_apps(search_term=None):
 
         result = subprocess.run(
             cmd, capture_output=True, text=True, timeout=5
-        )  # 8s -> 5s
-        if result.returncode != 0:
+        )
+        if not result.stdout.strip():
             return []
 
         apps = []
         if search_term:
-            # Pacman -Ss output format:
-            # repo/name version [installed]
-            #     description
             lines = result.stdout.strip().split("\n")
             for i in range(0, len(lines), 2):
                 if i + 1 >= len(lines):
@@ -618,29 +755,35 @@ def get_pacman_apps(search_term=None):
                 header = lines[i]
                 description = lines[i + 1].strip()
 
-                # Extract repo and name from "repo/name version ..."
-                match = re.match(r"^([^/]+)/([^\s]+)\s+", header)
+                # Extract repo, name, version from "repo/name version [installed]"
+                match = re.match(r"^([^/]+)/([^\s]+)\s+([^\s]+)", header)
                 if match:
                     repo = match.group(1)
                     name = match.group(2)
+                    version = match.group(3)
 
                     apps.append(
-                        {
-                            "id": f"arch:{name}",
-                            "name": name,
-                            "developer": f"Arch Linux {repo}",
-                            "category": categorize_app(name, description),
-                            "description": description,
-                            "icon_url": get_system_icon(name),
-                            "install_tier": 1,
-                            "hero_image": f"https://images.unsplash.com/photo-1614850523296-d8c1af93d400?q=80&w=800&auto=format&fit=crop",
-                            "install_command": f"pkexec pacman -S --noconfirm {name}",
-                            "source": "arch",
-                        }
+                        normalize_app_object(
+                            {
+                                "id": f"arch:{name}",
+                                "name": name,
+                                "package_name": name,
+                                "version": version,
+                                "developer": f"Arch Linux {repo}",
+                                "category": categorize_app(name, description),
+                                "description": description,
+                                "icon_url": get_system_icon(name),
+                                "install_tier": 1,
+                                "hero_image": "https://images.unsplash.com/photo-1614850523296-d8c1af93d400?q=80&w=800",
+                                "install_command": f"pkexec pacman -S --noconfirm {name}",
+                                "source": "pacman",
+                                "registry": "pacman",
+                                "security_score": 95,
+                            }
+                        )
                     )
 
         else:
-            # Sample popular ones
             names = result.stdout.strip().split("\n")[:5]
             for name in names:
                 if not name.strip():
@@ -656,20 +799,26 @@ def get_pacman_apps(search_term=None):
                             info[k.strip()] = v.strip()
 
                     apps.append(
-                        {
-                            "id": f"arch:{name}",
-                            "name": info.get("Name", name),
-                            "developer": f"Arch Linux {info.get('Repository', 'unknown')}",
-                            "category": categorize_app(
-                                name, info.get("Description", "")
-                            ),
-                            "description": info.get("Description", ""),
-                            "icon_url": "https://via.placeholder.com/128",
-                            "install_tier": 1,
-                            "hero_image": "https://via.placeholder.com/800x400",
-                            "install_command": f"pkexec pacman -S --noconfirm {name}",
-                            "source": "arch",
-                        }
+                        normalize_app_object(
+                            {
+                                "id": f"arch:{name}",
+                                "name": info.get("Name", name),
+                                "package_name": name,
+                                "version": info.get("Version", "latest"),
+                                "developer": f"Arch Linux {info.get('Repository', 'official')}",
+                                "category": categorize_app(
+                                    name, info.get("Description", "")
+                                ),
+                                "description": info.get("Description", ""),
+                                "icon_url": get_system_icon(name),
+                                "install_tier": 1,
+                                "hero_image": "https://images.unsplash.com/photo-1614850523296-d8c1af93d400?q=80&w=800",
+                                "install_command": f"pkexec pacman -S --noconfirm {name}",
+                                "source": "pacman",
+                                "registry": "pacman",
+                                "security_score": 95,
+                            }
+                        )
                     )
 
         return apps
@@ -688,6 +837,11 @@ def get_system_icon(name):
 @cached_with_ttl(ttl_seconds=120)
 def get_yay_apps(search_term=None):
     """Fetch applications from Arch User Repository (AUR) via yay."""
+    import shutil
+
+    if not shutil.which("yay"):
+        return []
+
     try:
         cmd = ["yay", "-Ss"]
         if search_term:
@@ -697,37 +851,42 @@ def get_yay_apps(search_term=None):
 
         result = subprocess.run(
             cmd, capture_output=True, text=True, timeout=8
-        )  # 20s -> 8s
-        if result.returncode != 0:
+        )
+        if result.returncode != 0 or not result.stdout.strip():
             return []
 
         apps = []
         lines = result.stdout.strip().split("\n")
-        # Yay output is also multi-line: header then description
         for i in range(0, len(lines), 2):
             if i + 1 >= len(lines):
                 break
             header = lines[i]
             description = lines[i + 1].strip()
 
-            # Match aur/name or similar
-            match = re.match(r"^(aur/)?([^\s]+)\s+", header)
+            match = re.match(r"^(aur/)?([^\s]+)\s+([^\s]+)?", header)
             if match:
                 name = match.group(2)
+                version = match.group(3) or "latest"
 
                 apps.append(
-                    {
-                        "id": f"aur:{name}",
-                        "name": name,
-                        "developer": "AUR Community",
-                        "category": categorize_app(name, description),
-                        "description": description,
-                        "icon_url": get_system_icon(name),
-                        "install_tier": 2,
-                        "hero_image": f"https://images.unsplash.com/photo-1614850523296-d8c1af93d400?q=80&w=800&auto=format&fit=crop",
-                        "install_command": f"yay -S --noconfirm {name}",
-                        "source": "aur",
-                    }
+                    normalize_app_object(
+                        {
+                            "id": f"aur:{name}",
+                            "name": name,
+                            "package_name": name,
+                            "version": version,
+                            "developer": "AUR Community",
+                            "category": categorize_app(name, description),
+                            "description": description,
+                            "icon_url": get_system_icon(name),
+                            "install_tier": 2,
+                            "hero_image": "https://images.unsplash.com/photo-1614850523296-d8c1af93d400?q=80&w=800",
+                            "install_command": f"yay -S --noconfirm {name}",
+                            "source": "aur",
+                            "registry": "aur",
+                            "security_score": 75,
+                        }
+                    )
                 )
 
         return apps
@@ -754,24 +913,34 @@ def get_popular_aur_apps():
     apps = []
     for app_info in popular_aur:
         apps.append(
-            {
-                "id": f"aur:{app_info['name']}",
-                "name": app_info["name"],
-                "developer": "AUR Community",
-                "category": categorize_app(app_info["name"], app_info["desc"]),
-                "description": app_info["desc"],
-                "icon_url": "https://via.placeholder.com/128",
-                "install_tier": 2,
-                "hero_image": "https://via.placeholder.com/800x400",
-                "install_command": f"yay -S --noconfirm {app_info['name']}",
-                "source": "aur",
-            }
+            normalize_app_object(
+                {
+                    "id": f"aur:{app_info['name']}",
+                    "name": app_info["name"],
+                    "package_name": app_info["name"],
+                    "developer": "AUR Community",
+                    "category": categorize_app(app_info["name"], app_info["desc"]),
+                    "description": app_info["desc"],
+                    "icon_url": get_system_icon(app_info["name"]),
+                    "install_tier": 2,
+                    "hero_image": "https://images.unsplash.com/photo-1614850523296-d8c1af93d400?q=80&w=800",
+                    "install_command": f"yay -S --noconfirm {app_info['name']}",
+                    "source": "aur",
+                    "registry": "aur",
+                    "security_score": 75,
+                }
+            )
         )
     return apps
 
 
 def get_docker_apps(search_term=None):
     """Fetch popular Docker images from Docker Hub."""
+    import shutil
+
+    if not shutil.which("docker"):
+        return []
+
     try:
         popular_images = [
             {"name": "nginx", "desc": "Official NGINX Docker image"},
@@ -792,21 +961,26 @@ def get_docker_apps(search_term=None):
                 or search_term.lower() in img["desc"].lower()
             ):
                 apps.append(
-                    {
-                        "id": f"docker:{img['name']}",
-                        "name": img["name"],
-                        "developer": "Docker Hub Official",
-                        "category": categorize_app(
-                            img["name"], img["desc"], f"docker:{img['name']}"
-                        ),
-                        "description": img["desc"],
-                        "icon_url": f"https://api.dicebear.com/7.x/identicon/svg?seed=docker-{img['name']}&backgroundColor=030303",
-                        "install_tier": 2,
-                        "hero_image": "https://images.unsplash.com/photo-1605745341112-85968b193ef5?q=80&w=800",
-                        "install_command": f"docker run -d -p 8080:80 {img['name']}",
-                        "source": "docker",
-                        "is_container": True,
-                    }
+                    normalize_app_object(
+                        {
+                            "id": f"docker:{img['name']}",
+                            "name": img["name"],
+                            "package_name": img["name"],
+                            "developer": "Docker Hub Official",
+                            "category": categorize_app(
+                                img["name"], img["desc"], f"docker:{img['name']}"
+                            ),
+                            "description": img["desc"],
+                            "icon_url": f"https://api.dicebear.com/7.x/identicon/svg?seed=docker-{img['name']}&backgroundColor=030303",
+                            "install_tier": 2,
+                            "hero_image": "https://images.unsplash.com/photo-1605745341112-85968b193ef5?q=80&w=800",
+                            "install_command": f"docker run -d -p 8080:80 {img['name']}",
+                            "source": "docker",
+                            "registry": "docker",
+                            "security_score": 72,
+                            "is_container": True,
+                        }
+                    )
                 )
 
         return apps
@@ -821,6 +995,7 @@ def get_custom_build_apps(search_term=None):
         {
             "id": "github:neovim/neovim",
             "name": "Neovim",
+            "package_name": "neovim",
             "developer": "Neovim Team",
             "category": "Development",
             "description": "Vim-fork focused on extensibility and usability",
@@ -829,10 +1004,13 @@ def get_custom_build_apps(search_term=None):
             "hero_image": "https://images.unsplash.com/photo-1542831371-29b0f74f9713?q=80&w=800",
             "install_command": "git clone https://github.com/neovim/neovim.git && cd neovim && make CMAKE_BUILD_TYPE=RelWithDebInfo && sudo make install",
             "source": "github",
+            "registry": "github",
+            "security_score": 70,
         },
         {
             "id": "github:photoflare/photoflare",
             "name": "Photoflare",
+            "package_name": "photoflare",
             "developer": "Photoflare Team",
             "category": "Design",
             "description": "Quick, simple but powerful Cross Platform image editor.",
@@ -841,10 +1019,13 @@ def get_custom_build_apps(search_term=None):
             "hero_image": "https://images.unsplash.com/photo-1626785774573-4b799315345d?q=80&w=800",
             "install_command": "git clone https://github.com/photoflare/photoflare.git && cd photoflare && qmake && make && sudo make install",
             "source": "github",
+            "registry": "github",
+            "security_score": 70,
         },
         {
             "id": "github:pixelitor/pixelitor",
             "name": "Pixelitor",
+            "package_name": "pixelitor",
             "developer": "Pixelitor Devs",
             "category": "Design",
             "description": "Advanced image editor with support for layers, layer masks, text layers, multiple undo, blending modes, etc.",
@@ -853,10 +1034,13 @@ def get_custom_build_apps(search_term=None):
             "hero_image": "https://images.unsplash.com/photo-1547826039-bfc35e0f1ea8?q=80&w=800",
             "install_command": "git clone https://github.com/pixelitor/pixelitor.git && cd pixelitor && ./gradlew build",
             "source": "github",
+            "registry": "github",
+            "security_score": 70,
         },
         {
             "id": "github:rapidraw/rapidraw",
             "name": "Rapidraw",
+            "package_name": "rapidraw",
             "developer": "Rapidraw Org",
             "category": "Design",
             "description": "GPU-accelerated RAW image editor for fast processing.",
@@ -865,18 +1049,21 @@ def get_custom_build_apps(search_term=None):
             "hero_image": "https://images.unsplash.com/photo-1558655146-d09347e92766?q=80&w=800",
             "install_command": "git clone https://github.com/rapidraw/rapidraw.git && cd rapidraw && cmake . && make && sudo make install",
             "source": "github",
+            "registry": "github",
+            "security_score": 70,
         },
     ]
 
+    raw_list = custom_apps
     if search_term:
         search_lower = search_term.lower()
-        return [
+        raw_list = [
             app
             for app in custom_apps
             if search_lower in app["name"].lower()
             or search_lower in app["description"].lower()
         ]
-    return custom_apps
+    return [normalize_app_object(a) for a in raw_list]
 
 
 def get_generic_linux_apps(cmd_name, search_term, source_label, install_template):
@@ -925,7 +1112,6 @@ def get_generic_linux_apps(cmd_name, search_term, source_label, install_template
                 name = parts[0].strip()
                 description = parts[1].strip() if len(parts) > 1 else ""
             elif cmd_name == "snap":
-                # snap find output: Name  Version  Publisher  Notes  Summary
                 parts = re.split(r"\s{2,}", line)
                 if len(parts) >= 2 and parts[0] != "Name":
                     name = parts[0]
@@ -942,18 +1128,22 @@ def get_generic_linux_apps(cmd_name, search_term, source_label, install_template
 
             if name:
                 apps.append(
-                    {
-                        "id": f"{cmd_name}:{name}",
-                        "name": name,
-                        "developer": f"{source_label.upper()} Repository",
-                        "category": categorize_app(name, description),
-                        "description": description,
-                        "icon_url": get_system_icon(name),
-                        "install_tier": 1,
-                        "hero_image": "https://images.unsplash.com/photo-1614850523296-d8c1af93d400?q=80&w=800",
-                        "install_command": install_template.format(name),
-                        "source": source_label,
-                    }
+                    normalize_app_object(
+                        {
+                            "id": f"{cmd_name}:{name}",
+                            "name": name,
+                            "package_name": name,
+                            "developer": f"{source_label.upper()} Repository",
+                            "category": categorize_app(name, description),
+                            "description": description,
+                            "icon_url": get_system_icon(name),
+                            "install_tier": 1,
+                            "hero_image": "https://images.unsplash.com/photo-1614850523296-d8c1af93d400?q=80&w=800",
+                            "install_command": install_template.format(name),
+                            "source": source_label,
+                            "registry": source_label,
+                        }
+                    )
                 )
         return apps
     except Exception as e:
@@ -981,9 +1171,6 @@ def get_zypper_apps(search_term=None):
 
 def get_appimage_apps(search_term=None):
     """Fetch apps that are available as AppImages (mock for now)."""
-    # In a real impl, we'd query appimage.github.io or similar
-    if not search_term:
-        return []
     return []
 
 
@@ -1014,7 +1201,7 @@ def get_fast_apps(search_term=None):
         except Exception as e:
             logger.error(f"Fast parallel search timeout or error: {e}")
 
-    return apps
+    return [normalize_app_object(a) for a in apps]
 
 
 def get_slow_apps(search_term=None):
@@ -1039,7 +1226,7 @@ def get_slow_apps(search_term=None):
                     results = future.result()
                     if results:
                         logger.info(f"[{source}] Found {len(results)} slow results")
-                        yield results  # Yield results as soon as they are ready
+                        yield [normalize_app_object(a) for a in results]
                 except Exception as e:
                     logger.error(f"[{source}] Slow search failed: {e}")
         except Exception as e:
@@ -1048,29 +1235,26 @@ def get_slow_apps(search_term=None):
 
 def get_all_available_apps(search_term=None):
     """DEPRECATED: Use get_fast_apps and get_slow_apps instead."""
-    # This function is kept for reference but should not be used directly for new search logic.
-    # The new two-stage search provides a better user experience.
     all_apps = get_fast_apps(search_term) + list(get_slow_apps(search_term))
 
-    # Remove duplicates
     seen_ids = set()
     unique_apps = []
     for app in all_apps:
         if app["id"] not in seen_ids:
             seen_ids.add(app["id"])
-            unique_apps.append(app)
+            unique_apps.append(normalize_app_object(app))
 
     return unique_apps
 
 
-# Initialize AI client
+# Search Endpoint (supporting /api/search & /api/v1/search)
+@app.route("/api/search", methods=["POST"])
 @app.route("/api/v1/search", methods=["POST"])
 def search_apps():
     """
-    New Two-Stage Search:
+    Two-Stage Search:
     1. Immediately returns fast, local results.
-    2. Initiates a background task for slower, network-based searches.
-    3. The frontend will use a separate streaming endpoint to get the slow results.
+    2. Gracefully falls back to pure OS keyword ranking if no AI API key or AI failure occurs.
     """
     auth_err = _require_auth()
     if auth_err:
@@ -1078,38 +1262,36 @@ def search_apps():
 
     data = request.json or {}
     query_str = data.get("query", "")
-    target_os = data.get("os", "linux").lower()
-
-    print(f"Fast search started for: '{query_str}'", flush=True)
 
     # --- Stage 1: Get Fast, Local Results ---
     fast_apps = get_fast_apps(query_str if query_str else None)
 
-    # Remove duplicates
+    # Remove duplicates & normalize
     seen_ids = set()
     unique_fast_apps = []
     for app in fast_apps:
-        if app["id"] not in seen_ids:
-            seen_ids.add(app["id"])
-            unique_fast_apps.append(app)
+        norm_app = normalize_app_object(app)
+        if norm_app["id"] not in seen_ids:
+            seen_ids.add(norm_app["id"])
+            unique_fast_apps.append(norm_app)
 
-    # --- AI Ranking for Fast Results ---
+    # Pure OS keyword fallback by default
+    final_results = rank_apps_by_keyword(unique_fast_apps, query_str)
+    intent = "pure_os_keyword_search"
+    category = "general"
+
+    # Try AI Ranking if LLM is configured and available
     api_key = data.get("api_key")
     provider = data.get("provider")
     model_override = data.get("model")
     model, api_kwargs = get_ai_config(api_key, provider, model_override)
 
-    final_results = unique_fast_apps
-    intent = "fast_search"
-    category = "unknown"
-
     if model and unique_fast_apps:
         try:
-            registry_apps_text = ""
-            for app in unique_fast_apps:
-                registry_apps_text += f'- id: "{app["id"]}", name: "{app["name"]}", category: "{app["category"]}", description: "{app["description"][:100]}..."\n'
-
-            system_prompt = f'You are an AI App Store engine. Rank apps from this registry for the query "{query_str}". Respond in JSON: {{"intent": "search", "category": "string", "matched_app_ids": []}}'
+            system_prompt = (
+                f'You are an AI App Store engine. Rank apps from this registry for the query "{query_str}". '
+                f'Respond in JSON: {{"intent": "search", "category": "string", "matched_app_ids": []}}'
+            )
 
             response = ai_complete(
                 model=model,
@@ -1119,13 +1301,12 @@ def search_apps():
                 ],
                 api_kwargs=api_kwargs,
                 response_format={"type": "json_object"},
-                timeout=10.0,
+                timeout=5.0,
             )
 
             ai_response = json.loads(response.choices[0].message.content)
             ai_matched_ids = ai_response.get("matched_app_ids", [])
 
-            # Create a ranked list
             ranked_apps = []
             seen_ranked_ids = set()
             for app_id in ai_matched_ids:
@@ -1135,28 +1316,28 @@ def search_apps():
                         seen_ranked_ids.add(app_id)
                         break
 
-            # Add remaining unranked apps
             for app in unique_fast_apps:
                 if app["id"] not in seen_ranked_ids:
                     ranked_apps.append(app)
 
             final_results = ranked_apps
-            intent = ai_response.get("intent", "ranked_search")
-            category = ai_response.get("category", "unknown")
+            intent = ai_response.get("intent", "ai_ranked_search")
+            category = ai_response.get("category", "general")
 
         except Exception as e:
-            logger.error(f"AI ranking for fast results failed: {e}")
+            logger.warning(f"AI ranking unavailable, fallback to pure OS keyword search: {e}")
 
     return jsonify(
         {
             "intent": intent,
             "category": category,
-            "results": final_results,
+            "results": [normalize_app_object(a) for a in final_results],
             "search_phase": "fast",
         }
     )
 
 
+@app.route("/api/search/stream", methods=["GET"])
 @app.route("/api/v1/search/stream", methods=["GET"])
 def search_stream():
     """
@@ -1164,26 +1345,21 @@ def search_stream():
     Reads parameters from the query string.
     """
     query_str = request.args.get("query", "")
-    # os = request.args.get("os", "linux") # os is not used in get_slow_apps
-    # api_key = request.args.get("api_key") # api_key is not used in get_slow_apps
-    # provider = request.args.get("provider") # provider is not used in get_slow_apps
-    # model = request.args.get("model") # model is not used in get_slow_apps
 
     def generate():
         try:
             print(f"Background search stream started for: '{query_str}'", flush=True)
-            # get_slow_apps is now a generator
             for app_batch in get_slow_apps(query_str if query_str else None):
                 if not app_batch:
                     continue
 
-                # Remove duplicates within the batch
                 seen_ids = set()
                 unique_apps = []
                 for app in app_batch:
-                    if app["id"] not in seen_ids:
-                        seen_ids.add(app["id"])
-                        unique_apps.append(app)
+                    norm_app = normalize_app_object(app)
+                    if norm_app["id"] not in seen_ids:
+                        seen_ids.add(norm_app["id"])
+                        unique_apps.append(norm_app)
 
                 if unique_apps:
                     event_data = json.dumps(
@@ -1207,7 +1383,6 @@ def search_stream():
             )
             yield f"event: error\ndata: {error_data}\n\n"
 
-        # Signal end of stream
         finally:
             complete_data = json.dumps({"search_phase": "slow_complete"})
             yield f"event: complete\ndata: {complete_data}\n\n"
@@ -1216,6 +1391,8 @@ def search_stream():
     return Response(generate(), mimetype="text/event-stream")
 
 
+@app.route("/api/system-info", methods=["GET"])
+@app.route("/api/v1/system-info", methods=["GET"])
 @app.route("/api/v1/system/info", methods=["GET"])
 def get_system_info():
     """Get system information for device-specific filtering."""
@@ -1224,10 +1401,8 @@ def get_system_info():
         return auth_err
     try:
         import socket
-
         import psutil
 
-        # Get system specs
         system_info = {
             "hostname": socket.gethostname(),
             "os": platform.system(),
@@ -1247,7 +1422,6 @@ def get_system_info():
             "available_sources": [],
         }
 
-        # Check which package managers are available
         import shutil
 
         sources = []
@@ -1256,6 +1430,7 @@ def get_system_info():
             ("pacman", "Pacman"),
             ("yay", "AUR"),
             ("docker", "Docker"),
+            ("snap", "Snap"),
         ]:
             if shutil.which(cmd):
                 sources.append(name)
@@ -1265,6 +1440,101 @@ def get_system_info():
     except Exception as e:
         print(f"Error getting system info: {e}", flush=True)
         return jsonify({"error": str(e)})
+
+
+@app.route("/api/categories", methods=["GET"])
+@app.route("/api/v1/categories", methods=["GET"])
+def get_categories():
+    """Return standard package categories."""
+    auth_err = _require_auth()
+    if auth_err:
+        return auth_err
+
+    categories = [
+        "Gaming",
+        "Development",
+        "Design",
+        "Video",
+        "Audio & Music",
+        "Communication",
+        "Web Browser",
+        "Productivity",
+        "AI Tools",
+        "Utilities",
+    ]
+    return jsonify({"categories": categories})
+
+
+@app.route("/api/app-details", methods=["GET", "POST"])
+@app.route("/api/v1/app-details", methods=["GET", "POST"])
+def get_app_details():
+    """Get sanitized, normalized app details and security score analysis."""
+    auth_err = _require_auth()
+    if auth_err:
+        return auth_err
+
+    data = request.json if request.is_json else {}
+    app_id = data.get("app_id") or request.args.get("app_id") or ""
+    name = data.get("name") or request.args.get("name") or (app_id.split(":")[-1] if ":" in app_id else app_id) or "Package Details"
+
+    assets = get_app_assets(app_id, name)
+    raw_app = {
+        "id": app_id or f"arch:{name}",
+        "name": name,
+        "description": data.get("description", f"{name} application package for Linux."),
+        "icon_url": assets.get("icon"),
+        "hero_image": assets.get("hero"),
+        "source": data.get("source") or data.get("registry") or "official",
+        "category": categorize_app(name, "", app_id),
+    }
+    normalized = normalize_app_object(raw_app)
+
+    return jsonify(
+        {
+            "app": normalized,
+            "security_audit": {
+                "security_score": normalized["security_score"],
+                "verified": normalized["security_score"] >= 80,
+                "sandbox_level": "Bubblewrap Sandbox" if normalized["registry"] == "flatpak" else "System Native",
+            },
+        }
+    )
+
+
+@app.route("/api/install", methods=["POST"])
+@app.route("/api/v1/install", methods=["POST"])
+def install_app_endpoint():
+    """Standard installation trigger endpoint with command safety sanitization."""
+    auth_err = _require_auth()
+    if auth_err:
+        return auth_err
+
+    data = request.json or {}
+    app_id = data.get("app_id", "")
+    install_command = data.get("install_command", "")
+    pkg_name = data.get("package_name") or data.get("name") or app_id
+
+    if not validate_command_safety(install_command):
+        logger.warning(f"Unsafe installation command rejected: '{install_command}'")
+        return jsonify({"error": "Invalid or unsafe installation command"}), 400
+
+    raw_app = {
+        "id": app_id,
+        "name": pkg_name,
+        "install_command": install_command,
+        "source": data.get("registry") or data.get("source") or "official",
+    }
+    normalized = normalize_app_object(raw_app)
+
+    return jsonify(
+        {
+            "status": "validated",
+            "app_id": app_id,
+            "install_command": install_command,
+            "app": normalized,
+            "message": "Command sanitized and cleared for execution.",
+        }
+    )
 
 
 @app.route("/api/v1/system/apps", methods=["GET"])

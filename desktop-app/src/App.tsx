@@ -210,7 +210,10 @@ export default function App() {
                       theme={theme}
                     />
                   ) : view === "ai-tools" ? (
-                    <AIToolsView theme={theme} />
+                    <AIToolsView
+                      theme={theme}
+                      onSearchQuery={(q) => onSearch({ preventDefault: () => {} } as any, q)}
+                    />
                    ) : view === "settings" ? (
                      <SettingsView
                        theme={theme}
