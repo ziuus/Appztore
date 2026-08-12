@@ -25,9 +25,7 @@ import type { View, Plan, AppResult } from "./types";
 
 export default function App() {
   // --- State ---
-  const [view, setView] = useState<View>(() => {
-    return localStorage.getItem("appztore_setup_complete") === "true" ? "discover" : "onboarding";
-  });
+  const [view, setView] = useState<View>("discover");
   const [onboardingStep, setOnboardingStep] = useState(1);
   const [theme, setTheme] = useState<"dark" | "light">("dark");
   const [apiKey, setApiKey] = useState<string | null>(() => {

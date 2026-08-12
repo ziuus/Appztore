@@ -44,14 +44,23 @@ export const OnboardingView = ({
             <p className="text-xl text-slate-500 font-bold leading-relaxed">
               Your Linux experience, unified. Let's get your workstation synchronized with the cloud.
             </p>
-            <div className="pt-8">
+            <div className="pt-8 flex flex-col sm:flex-row items-center justify-center gap-4">
               <SpotlightButton
                 variant="action"
                 onClick={handleGoogleSignIn}
-                className="px-16 h-20 text-2xl font-black"
+                className="px-12 h-16 text-xl font-black"
               >
                 Sign in with Google
               </SpotlightButton>
+              <button
+                onClick={() => {
+                  localStorage.setItem("appztore_setup_complete", "true");
+                  setView("discover");
+                }}
+                className="px-8 h-16 rounded-2xl bg-white/5 border border-white/10 text-slate-300 font-bold hover:bg-white/10 hover:text-white transition-all text-base"
+              >
+                Skip & Continue as Guest
+              </button>
             </div>
           </motion.div>
         ) : (
