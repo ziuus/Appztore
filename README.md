@@ -1,104 +1,136 @@
-# 🌌 Appztore AI: The Universal Software Engine
+# 📦 Appztore
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-emerald.svg)](LICENSE)
-[![Build: Tauri](https://img.shields.io/badge/Build-Tauri-blue.svg)](https://tauri.app/)
-[![Backend: Flask](https://img.shields.io/badge/Intelligence-Groq_LLM-purple.svg)](https://groq.com/)
+> **Universal Package & Application Orchestrator for Linux.**  
+> Unifies Pacman, AUR, Flatpak, Snapcraft, and Docker into a single, high-density desktop interface.
 
-Appztore is a **next-generation application orchestrator** for Linux. It replaces fragmented package managers with a unified, high-fidelity neural interface. Built for the 2030 standard of software discovery, Appztore bridges the gap between local system registries, global container hubs, and source-build repositories.
-
----
-
-## ✨ The Premium Experience
-
-Appztore isn't just a package manager; it's a **Product Showcase**.
-- **Lush Forest Theme:** A sophisticated, deep-emerald aesthetic using Glassmorphism and Backdrop-Blur.
-- **Dynamic Spotlights:** Cursor-tracking light effects and staggered Framer Motion entrances.
-- **High-Fidelity Assets:** Auto-fetching of 4K hero images and high-resolution SVG icons for every application.
-- **SaaS Dashboard:** A dedicated Search View separate from the Discover Home, providing a focused, professional workspace.
+[![Version](https://img.shields.io/github/v/release/ziuus/Appztore?color=68BA7F&label=version)](https://github.com/ziuus/Appztore/releases/tag/v1.0.1)
+[![License](https://img.shields.io/github/license/ziuus/Appztore?color=blue)](LICENSE)
+[![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-informational)](https://github.com/ziuus/Appztore/releases)
 
 ---
 
-## 🧠 Neural Orchestration
+## Overview
 
-Powered by **Llama 3.3 (via Groq)**, Appztore understands *intent*, not just keywords.
-- **Natural Language Search:** Ask for "a professional video editor for cinematic color grading" and get ranked suggestions across all registries.
-- **AI System Insights:** Real-time analysis of installation risks, dependency conflicts, and kernel compatibility.
-- **Automated Categorization:** Dynamic sorting of apps into Gaming, Development, Design, AI Tools, and more based on deep metadata analysis.
+Linux software installation is often fragmented across multiple package managers (`pacman`, `yay`, `flatpak`, `snap`, `docker`). **Appztore** acts as a unified control plane for Linux desktop software — enabling intent-based search, multi-registry discovery, security audit scoring, and real-time installation telemetry in one native desktop app.
 
 ---
 
-## 🛠️ The Universal Engine
+## Key Features
 
-Appztore unifies the most powerful Linux distribution methods into a single, cohesive API.
-
-| Registry | Status | Support Level |
-| :--- | :--- | :--- |
-| **Flatpak / Flathub** | ✅ Native | Full Metadata & Remote Icons |
-| **Arch / Pacman** | ✅ Native | Official Repositories |
-| **AUR / Yay** | ✅ Native | Community Driven Builds |
-| **Docker Hub** | ✅ Container | Official Image Discovery |
-| **GitHub / Git** | ✅ Source | Automated Clone & Build Pipelines |
-| **Snapcraft** | ✅ Universal | Canonical Snap Support |
-| **APT / DNF / Zypper** | ✅ Distro | Core System Integration |
+- **Unified Registry Search:** Query **Pacman**, **AUR (Yay)**, **Flatpak (Flathub)**, **Snapcraft**, and **Docker Hub** simultaneously.
+- **Pure OS Fallback:** Full offline search capability using native system binaries (`pacman -Ss`, `flatpak search`, `yay -Ss`) without requiring external API keys.
+- **Security Audit Scoring:** Automated package safety verification displaying registry verification tiers (Arch Official 95%, Flathub 88%, AUR Community 75%).
+- **Command Injection Guard:** Strict regex-based input sanitization blocking command injection risks (`;&|` operators) prior to `pkexec` / `sudo` execution.
+- **Real-Time Telemetry:** Terminal viewer streaming live stdout output during package installation.
+- **Optional Intent Intelligence:** Optional LiteLLM/Groq integration for natural language intent queries (e.g. *"lightweight terminal file manager with vim bindings"*).
 
 ---
 
-## 🚀 Quick Start
+## Universal Registry Support
 
-### 1. Prerequisites
-Ensure you have the following installed on your Linux system:
-- **Rust & Cargo** (for Tauri)
-- **Node.js 20+** (for Vite)
-- **Python 3.12+** (for the AI Backend)
-- **Flatpak / Yay / Docker** (depending on which registries you wish to use)
+| Registry Source | Driver | Package Resolution | Security Verification |
+| :--- | :--- | :--- | :--- |
+| **Arch / Pacman** | Native `pacman` | Official Repositories | GPG Verified (95%) |
+| **Arch / AUR** | Native `yay` / `paru` | User Repository Builds | Community Scanned (75%) |
+| **Flatpak** | Native `flatpak` | Flathub Remotes | Sandbox Verified (88%) |
+| **Snapcraft** | Native `snap` | Canonical Snap Store | Strict Confinement (85%) |
+| **Docker Hub** | Native `docker` | Container Images | Official Image Check (90%) |
 
-### 2. Installation
+---
+
+## ⚡ Quick Start
+
+### 1. Download Pre-Built Release (Recommended)
+
+Get the latest release binary for your Linux distribution from [GitHub Releases](https://github.com/ziuus/Appztore/releases/latest):
+
 ```bash
-# Clone the repository
+# Universal Linux (AppImage)
+chmod +x appztore_1.0.1_amd64.AppImage
+./appztore_1.0.1_amd64.AppImage
+
+# Arch Linux (Local build)
+git clone https://github.com/ziuus/Appztore.git
+cd Appztore
+./RUN_APP.sh
+
+# Debian / Ubuntu (.deb)
+sudo dpkg -i appztore_1.0.1_amd64.deb
+
+# Fedora / RHEL (.rpm)
+sudo rpm -i appztore-1.0.1-1.x86_64.rpm
+```
+
+---
+
+## 🏗️ System Architecture
+
+Appztore is structured as a light native shell with a Python core service:
+
+```
+Appztore Engine
+├── Frontend UI         React 19 + TypeScript + Framer Motion (Vite)
+├── Native Window       Tauri v2 (Rust) — System tray & OS bridge
+└── Backend Core        Python 3.12+ Flask (LiteLLM + Parallel Registry Drivers)
+```
+
+- **Frontend:** High-density dark UI with responsive filter tabs, telemetry logs, and security badges.
+- **Native Bridge (Rust/Tauri):** Low-overhead windowing, native notifications, and secure privileged process execution.
+- **Backend Service (Python/Flask):** Multi-threaded registry query orchestrator, package metadata normalization, and optional LLM intent resolution.
+
+---
+
+## 🛠️ Building from Source
+
+### Prerequisites
+
+- **Rust & Cargo** (v1.77+)
+- **Node.js** (v20+) & **pnpm**
+- **Python** (v3.10+)
+
+### Setup
+
+```bash
+# 1. Clone repo
 git clone https://github.com/ziuus/Appztore.git
 cd Appztore
 
-# Setup Backend
+# 2. Setup Python Backend Environment
 cd backend
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 
-# Setup Frontend
+# 3. Setup Frontend & Launch App
 cd ../desktop-app
-npm install
-```
-
-### 3. Configuration
-Create a `.env` file in the `backend/` directory:
-```env
-GROQ_API_KEY=your_key_here
-```
-
-### 4. Launch
-Use the production-ready launcher:
-```bash
+pnpm install
+cd ..
 ./RUN_APP.sh
 ```
 
 ---
 
-## 🏗️ Architecture
+## 🧪 Testing
 
-- **Frontend:** React 19 + TypeScript + Framer Motion (State-of-the-art UI).
-- **Native Bridge:** Rust (Tauri v2). Handles secure OS command execution via `pkexec` and `std::process`.
-- **Intelligent Core:** Python Flask. Manages the parallel search engine, LLM orchestration, and high-fidelity asset mapping.
+Run backend security and integration unit tests:
 
----
-
-## 🛡️ Security & Integrity
-- **Privileged Context:** All system modifications require explicit authentication via standard Linux `pkexec` or `sudo` prompts.
-- **Command Sanitization:** Strict regex-based validation of all terminal inputs within the Rust layer to prevent shell injection.
-- **Privacy-First:** User data remains local; only anonymized queries are sent to the AI engine for discovery.
+```bash
+cd backend
+source .venv/bin/activate
+python -m pytest
+```
 
 ---
 
-<p align="center">
-  <i>Built for the next decade of Linux Desktop Engineering.</i><br>
-  <b>Appztore Labs © 2026</b>
-</p>
+## 🛡️ Security Policy
+
+Appztore prioritizes local system security:
+- **No Unsanitized Inputs:** Shell parameters are validated against strict whitelist patterns (`^[a-zA-Z0-9_\-\.\:\/]+$`).
+- **Privilege Separation:** Privileged operations utilize standard Linux `pkexec` prompts without storing passwords in memory.
+- **Local Privacy:** Registry queries remain strictly local unless optional LLM intent resolution is manually enabled.
+
+---
+
+## 📄 License
+
+Distributed under the [MIT License](LICENSE). Copyright © 2026 Noel Paul Tomy (ziuus).
