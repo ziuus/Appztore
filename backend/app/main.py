@@ -1179,6 +1179,7 @@ def get_fast_apps(search_term=None):
     fast_funcs = [
         ("Pacman", get_pacman_apps),
         ("Yay", get_yay_apps),
+        ("Flatpak", get_flatpak_apps),
         ("Docker", get_docker_apps),
         ("Custom", get_custom_build_apps),
     ]
@@ -1207,7 +1208,6 @@ def get_fast_apps(search_term=None):
 def get_slow_apps(search_term=None):
     """Fetch apps from slow, network-dependent sources, yielding results as they complete."""
     slow_funcs = [
-        ("Flatpak", get_flatpak_apps),
         ("Snap", get_snap_apps),
         ("APT", get_apt_apps),
         ("DNF", get_dnf_apps),
