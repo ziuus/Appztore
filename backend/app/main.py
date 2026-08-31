@@ -1159,6 +1159,36 @@ def get_zypper_apps(search_term=None):
     )
 
 
+def get_discover_apps():
+    """Return a curated set of popular apps for the discover page (no search term)."""
+    discover_queries = ["editor", "browser", "media", "game", "terminal"]
+    all_apps = []
+    seen_ids = set()
+
+    # Pull a broad set from each source with varied queries
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = []
+        for q in discover_queries:
+            futures.append(executor.submit(get_pacman_apps, q))
+            futures.append(executor.submit(get_flatpak_apps, q))
+        futures.append(executor.submit(get_docker_apps, None))
+        futures.append(executor.submit(get_custom_build_apps, None))
+        futures.append(executor.submit(get_popular_aur_apps))
+
+        for future in as_completed(futures, timeout=15):
+            try:
+                results = future.result() or []
+                for app in results:
+                    norm = normalize_app_object(app)
+                    if norm["id"] not in seen_ids:
+                        seen_ids.add(norm["id"])
+                        all_apps.append(norm)
+            except Exception as e:
+                logger.error(f"Discover fetch error: {e}")
+
+    return all_apps
+
+
 def get_appimage_apps(search_term=None):
     """AppImage search — not yet implemented (no universal AppImage registry API exists)."""
     return []
@@ -1180,7 +1210,7 @@ def get_fast_apps(search_term=None):
             executor.submit(func, search_term): source for source, func in fast_funcs
         }
         try:
-            for future in as_completed(future_to_source, timeout=4):
+            for future in as_completed(future_to_source, timeout=12):
                 source = future_to_source[future]
                 try:
                     results = future.result()
@@ -1254,7 +1284,11 @@ def search_apps():
     query_str = data.get("query", "")
 
     # --- Stage 1: Get Fast, Local Results ---
-    fast_apps = get_fast_apps(query_str if query_str else None)
+    if query_str.strip():
+        fast_apps = get_fast_apps(query_str)
+    else:
+        # Empty query = discover page: return a rich cross-source set
+        fast_apps = get_discover_apps()
 
     # Remove duplicates & normalize
     seen_ids = set()
@@ -1270,11 +1304,19 @@ def search_apps():
     intent = "pure_os_keyword_search"
     category = "general"
 
-    # Try AI Ranking if LLM is configured and available
+    # Only attempt AI ranking if caller explicitly provides an api_key in the request
+    # OR if a valid DEFAULT_AI_MODEL is configured via environment variables.
+    # Do not attempt AI when only DEFAULT_AI_MODEL is set from env — it may be
+    # stale/expired; require explicit user key for AI ranking to avoid latency on every search.
     api_key = data.get("api_key")
     provider = data.get("provider")
     model_override = data.get("model")
-    model, api_kwargs = get_ai_config(api_key, provider, model_override)
+
+    # Only use AI if the user explicitly passed an api_key in this request
+    if api_key and unique_fast_apps:
+        model, api_kwargs = get_ai_config(api_key, provider, model_override)
+    else:
+        model, api_kwargs = None, {}
 
     if model and unique_fast_apps:
         try:
