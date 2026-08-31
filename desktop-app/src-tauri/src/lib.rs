@@ -310,6 +310,7 @@ pub fn run() {
             }
             Ok(())
         })
+        .plugin(tauri_plugin_http::init())
         .invoke_handler(tauri::generate_handler![install_app, uninstall_app])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

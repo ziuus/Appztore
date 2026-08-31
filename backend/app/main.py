@@ -718,7 +718,7 @@ def get_flatpak_apps(search_term=None):
 
 
 def get_system_icon(name):
-    """Try to find a local icon for a given package name."""
+    """Generate a deterministic identicon URL for a package name."""
     from urllib.parse import quote
 
     encoded_name = quote(name)
@@ -824,14 +824,6 @@ def get_pacman_apps(search_term=None):
         return apps
     except Exception:
         return []
-
-
-def get_system_icon(name):
-    """Try to find a local icon for a given package name."""
-    from urllib.parse import quote
-
-    encoded_name = quote(name)
-    return f"https://api.dicebear.com/7.x/identicon/svg?seed={encoded_name}&backgroundColor=030303"
 
 
 @cached_with_ttl(ttl_seconds=120)
@@ -2057,7 +2049,13 @@ def get_install_insight():
         api_kwargs=api_kwargs,
         response_format={"type": "json_object"},
     )
-    return response.choices[0].message.content
+    try:
+        content = response.choices[0].message.content
+        parsed = json.loads(content)
+        return jsonify(parsed)
+    except Exception as e:
+        logger.error(f"AI insight parse error: {e}")
+        return jsonify({"insights": ["Standard installation process"], "ai_thought": "AI response could not be parsed."})
 
 
 @app.route("/api/v1/install/analyze-error", methods=["POST"])
@@ -2111,7 +2109,13 @@ def analyze_install_error():
         api_kwargs=api_kwargs,
         response_format={"type": "json_object"},
     )
-    return response.choices[0].message.content
+    try:
+        content = response.choices[0].message.content
+        parsed = json.loads(content)
+        return jsonify(parsed)
+    except Exception as e:
+        logger.error(f"AI error analysis parse error: {e}")
+        return jsonify({"reason": "Unknown error", "fix_command": None, "ai_insight": "Could not parse AI response.", "severity": "warning"})
 
 
 @app.route("/api/v1/install/verify", methods=["POST"])

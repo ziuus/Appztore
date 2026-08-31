@@ -1,6 +1,6 @@
 import { Search, Loader2 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
-import { useState } from "react";
+import { useState, useRef, useEffect } from "react";
 
 interface HeaderProps {
   query: string;
@@ -22,6 +22,24 @@ export const Header = ({
   isSearching,
 }: HeaderProps) => {
   const [showHistory, setShowHistory] = useState(false);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  // Close dropdown when clicking outside the search container
+  useEffect(() => {
+    const handleOutsideClick = (e: MouseEvent) => {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+        setShowHistory(false);
+      }
+    };
+
+    if (showHistory) {
+      document.addEventListener("mousedown", handleOutsideClick);
+    }
+
+    return () => {
+      document.removeEventListener("mousedown", handleOutsideClick);
+    };
+  }, [showHistory]);
 
   return (
     <header className="px-12 pt-12 pb-8 bg-transparent z-20 sticky top-0">
@@ -35,7 +53,7 @@ export const Header = ({
         <div
           className={`absolute -inset-1 bg-gradient-to-r from-[#2E6F40]/40 to-[#68BA7F]/40 rounded-3xl blur-2xl opacity-0 group-focus-within:opacity-100 transition-all duration-700`}
         />
-        <div className="relative flex items-center">
+        <div className="relative flex items-center" ref={containerRef}>
           {isSearching ? (
             <Loader2 className="absolute left-6 h-6 w-6 text-[#68BA7F] animate-spin z-20" />
           ) : (
@@ -46,16 +64,19 @@ export const Header = ({
             onFocus={() => setShowHistory(true)}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === "Enter") {
+              if (e.key === "Escape") {
+                setShowHistory(false);
+              } else if (e.key === "Enter") {
                 e.preventDefault();
                 handleSearch(e as any);
                 setShowHistory(false);
               }
             }}
+            placeholder="Search packages across all registries..."
             className={`pl-16 h-16 w-full text-xl rounded-2xl outline-none border transition-all relative z-10 ${
               theme === "dark"
-                ? "bg-[#0a1a1a]/40 border-white/10 text-white backdrop-blur-2xl focus:border-[#68BA7F]/50"
-                : "bg-white/50 border-slate-200 text-slate-900 focus:border-green-500 shadow-sm"
+                ? "bg-[#0a1a1a]/40 border-white/10 text-white backdrop-blur-2xl focus:border-[#68BA7F]/50 placeholder:text-slate-600"
+                : "bg-white/50 border-slate-200 text-slate-900 focus:border-green-500 shadow-sm placeholder:text-slate-400"
             }`}
           />
           <AnimatePresence>
@@ -74,7 +95,10 @@ export const Header = ({
                   </h5>
                   <button
                     type="button"
-                    onClick={clearHistory}
+                    onClick={() => {
+                      clearHistory();
+                      setShowHistory(false);
+                    }}
                     className="text-[10px] font-black uppercase tracking-[0.2em] text-red-500/60 hover:text-red-500 transition-colors"
                   >
                     Clear All
@@ -91,7 +115,9 @@ export const Header = ({
                         setShowHistory(false);
                       }}
                       className={`w-full flex items-center gap-4 px-4 py-3 rounded-xl text-left transition-colors ${
-                        theme === "dark" ? "hover:bg-white/5 text-slate-300" : "hover:bg-slate-100 text-slate-700"
+                        theme === "dark"
+                          ? "hover:bg-white/5 text-slate-300"
+                          : "hover:bg-slate-100 text-slate-700"
                       }`}
                     >
                       <Search className="h-4 w-4 opacity-40" />

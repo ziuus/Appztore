@@ -25,7 +25,11 @@ import type { View, Plan, AppResult } from "./types";
 
 export default function App() {
   // --- State ---
-  const [view, setView] = useState<View>("discover");
+  // Skip onboarding if the user has already completed it
+  const [view, setView] = useState<View>(() => {
+    const setupDone = localStorage.getItem("appztore_setup_complete") === "true";
+    return setupDone ? "discover" : "onboarding";
+  });
   const [onboardingStep, setOnboardingStep] = useState(1);
   const [theme, setTheme] = useState<"dark" | "light">("dark");
   const [apiKey, setApiKey] = useState<string | null>(() => {

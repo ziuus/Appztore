@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 
-const API_BASE = "http://localhost:8000";
+const API_BASE = import.meta.env.VITE_API_ENDPOINT || "http://localhost:8000";
 
 export const useFeaturedData = (view: string) => {
   const [featuredData, setFeaturedData] = useState<any>(null);
