@@ -329,8 +329,6 @@ def _require_auth():
     return jsonify({"error": "unauthorized"}), 401
 
 
-# Mock Database (will be replaced by dynamic search)
-MOCK_REGISTRY = []
 
 
 # Specific high-fidelity image mapping to avoid broken/generic images
@@ -1162,7 +1160,7 @@ def get_zypper_apps(search_term=None):
 
 
 def get_appimage_apps(search_term=None):
-    """Fetch apps that are available as AppImages (mock for now)."""
+    """AppImage search — not yet implemented (no universal AppImage registry API exists)."""
     return []
 
 
@@ -2040,22 +2038,22 @@ def get_install_insight():
             }
         )
 
-    response = ai_complete(
-        model=model,
-        messages=[
-            {"role": "system", "content": "You are a Linux System Expert."},
-            {"role": "user", "content": prompt},
-        ],
-        api_kwargs=api_kwargs,
-        response_format={"type": "json_object"},
-    )
     try:
+        response = ai_complete(
+            model=model,
+            messages=[
+                {"role": "system", "content": "You are a Linux System Expert."},
+                {"role": "user", "content": prompt},
+            ],
+            api_kwargs=api_kwargs,
+            response_format={"type": "json_object"},
+        )
         content = response.choices[0].message.content
         parsed = json.loads(content)
         return jsonify(parsed)
     except Exception as e:
-        logger.error(f"AI insight parse error: {e}")
-        return jsonify({"insights": ["Standard installation process"], "ai_thought": "AI response could not be parsed."})
+        logger.warning(f"AI insight unavailable: {e}")
+        return jsonify({"insights": ["Standard installation process"], "ai_thought": "AI unavailable — check your API key.", "risks": [], "requires_user_decision": False, "decision_prompt": ""})
 
 
 @app.route("/api/v1/install/analyze-error", methods=["POST"])
@@ -2097,25 +2095,25 @@ def analyze_install_error():
     }}
     """
 
-    response = ai_complete(
-        model=model,
-        messages=[
-            {
-                "role": "system",
-                "content": "You are an expert Linux System Troubleshooter.",
-            },
-            {"role": "user", "content": prompt},
-        ],
-        api_kwargs=api_kwargs,
-        response_format={"type": "json_object"},
-    )
     try:
+        response = ai_complete(
+            model=model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are an expert Linux System Troubleshooter.",
+                },
+                {"role": "user", "content": prompt},
+            ],
+            api_kwargs=api_kwargs,
+            response_format={"type": "json_object"},
+        )
         content = response.choices[0].message.content
         parsed = json.loads(content)
         return jsonify(parsed)
     except Exception as e:
-        logger.error(f"AI error analysis parse error: {e}")
-        return jsonify({"reason": "Unknown error", "fix_command": None, "ai_insight": "Could not parse AI response.", "severity": "warning"})
+        logger.warning(f"AI error analysis unavailable: {e}")
+        return jsonify({"reason": "Manual inspection required", "fix_command": None, "ai_insight": "AI unavailable — check your API key.", "severity": "warning"})
 
 
 @app.route("/api/v1/install/verify", methods=["POST"])
