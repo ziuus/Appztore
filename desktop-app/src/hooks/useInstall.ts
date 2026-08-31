@@ -100,22 +100,23 @@ export const useInstall = (
       console.warn("Backend install validation notice:", err.message);
     }
 
-    // 2. Fetch AI Insights if available
-    try {
-      const payload: any = { app_id: app.id };
-      if (apiKey) payload.api_key = apiKey;
-      if (provider && provider !== "auto") payload.provider = provider;
-      if (model) payload.model = model;
+    // 2. Fetch AI Insights only if user has an API key configured
+    if (apiKey) {
+      try {
+        const payload: any = { app_id: app.id, api_key: apiKey };
+        if (provider && provider !== "auto") payload.provider = provider;
+        if (model) payload.model = model;
 
-      const res = await fetch(`${API_BASE}/api/v1/install/insight`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      const insight = await res.json();
-      setInstallInsight(insight);
-    } catch (e) {
-      console.error(e);
+        const res = await fetch(`${API_BASE}/api/v1/install/insight`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        const insight = await res.json();
+        setInstallInsight(insight);
+      } catch (e) {
+        console.error("Install insight fetch failed:", e);
+      }
     }
 
     // 3. Initiate installation with live progress state

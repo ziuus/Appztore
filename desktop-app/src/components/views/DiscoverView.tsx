@@ -29,6 +29,8 @@ interface DiscoverViewProps {
   handleInstall: (app: AppResult) => void;
   isAppInstalled: (app: AppResult) => boolean;
   setResults: (res: AppResult[] | null) => void;
+  isStreaming?: boolean;
+  apiKey?: string | null;
 }
 
 type TabFilter = "all" | "pacman_aur" | "flatpak" | "snap" | "github" | "docker";
@@ -44,6 +46,8 @@ export const DiscoverView = ({
   handleInstall,
   isAppInstalled,
   setResults,
+  isStreaming = false,
+  apiKey,
 }: DiscoverViewProps) => {
   const [searchTab, setSearchTab] = useState<TabFilter>("all");
 
@@ -110,7 +114,7 @@ export const DiscoverView = ({
               </span>
             </div>
 
-            {/* High-density Neural Intent & Telemetry Banner */}
+            {/* Search status banner */}
             <div
               className={`p-4 rounded-2xl border flex flex-wrap items-center justify-between gap-4 text-xs ${
                 theme === "dark"
@@ -121,13 +125,24 @@ export const DiscoverView = ({
               <div className="flex items-center gap-3">
                 <Cpu className="h-4 w-4 text-[#68BA7F] shrink-0" />
                 <span className="font-bold">
-                  Intent Resolution: <span className="text-[#68BA7F]">"{query}"</span>
+                  {apiKey ? "AI Intent:" : "Registry Search:"}{" "}
+                  <span className="text-[#68BA7F]">"{query}"</span>
                 </span>
               </div>
               <div className="flex items-center gap-4 flex-wrap">
+                {isStreaming && (
+                  <span className="flex items-center gap-1.5 font-mono text-[11px] text-amber-400">
+                    <motion.span
+                      animate={{ opacity: [1, 0.3, 1] }}
+                      transition={{ duration: 1.2, repeat: Infinity }}
+                      className="w-1.5 h-1.5 rounded-full bg-amber-400 inline-block"
+                    />
+                    Loading more sources...
+                  </span>
+                )}
                 <span className="flex items-center gap-1 font-mono text-[11px]">
                   <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" />
-                  Deterministic OS Search Active
+                  {apiKey ? "AI + OS Search Active" : "Pure OS Search Active"}
                 </span>
                 <span className="flex items-center gap-1 font-mono text-[11px]">
                   <ShieldCheck className="h-3.5 w-3.5 text-[#68BA7F]" />

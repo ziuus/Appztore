@@ -53,6 +53,7 @@ export default function App() {
     query,
     setQuery,
     isSearching,
+    isStreaming,
     results,
     setResults,
     searchHistory,
@@ -186,10 +187,10 @@ export default function App() {
                         />
                       </div>
                       <h3 className="text-2xl font-black tracking-tighter animate-pulse">
-                        AI Brain Resolving Intent...
+                        {apiKey ? "AI Resolving Intent..." : "Searching Registries..."}
                       </h3>
                       <p className="text-slate-500 font-bold mt-2 uppercase tracking-widest text-xs">
-                        Searching across multiple Linux sources
+                        Querying Pacman · AUR · Flatpak · Docker
                       </p>
                     </motion.div>
                   ) : view === "discover" || view === "search" ? (
@@ -204,6 +205,8 @@ export default function App() {
                       handleInstall={handleInstall}
                       isAppInstalled={isAppInstalled}
                       setResults={setResults}
+                      isStreaming={isStreaming}
+                      apiKey={apiKey}
                     />
                   ) : view === "my-apps" ? (
                     <MyAppsView
