@@ -1267,6 +1267,28 @@ def get_all_available_apps(search_term=None):
     return unique_apps
 
 
+@app.route("/health", methods=["GET"])
+@app.route("/api/health", methods=["GET"])
+@app.route("/api/v1/health", methods=["GET"])
+def health_check():
+    """Health check endpoint providing service status, metadata, and cache statistics."""
+    with _cache_lock:
+        cached_count = len(_result_cache)
+    return (
+        jsonify(
+            {
+                "status": "healthy",
+                "service": "appztore-backend",
+                "version": "1.0.5",
+                "timestamp": int(time.time()),
+                "cache_entries": cached_count,
+                "platform": platform.system().lower(),
+            }
+        ),
+        200,
+    )
+
+
 # Search Endpoint (supporting /api/search & /api/v1/search)
 @app.route("/api/search", methods=["POST"])
 @app.route("/api/v1/search", methods=["POST"])

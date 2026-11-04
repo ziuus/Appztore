@@ -20,10 +20,13 @@ jobs:
           cd backend
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          pip install -r requirements-dev.txt
       - name: Lint with flake8
         run: |
-          pip install flake8
           flake8 backend/app --count --select=E9,F63,F7,F82 --show-source --statistics
+      - name: Run backend tests
+        run: |
+          pytest backend/test_backend.py
 
   test-frontend:
     runs-on: ubuntu-latest
@@ -43,7 +46,12 @@ jobs:
         run: |
           cd desktop-app
           pnpm install
+      - name: Lint frontend
+        run: |
+          cd desktop-app
+          pnpm run lint
       - name: Build frontend
         run: |
           cd desktop-app
           pnpm run build
+

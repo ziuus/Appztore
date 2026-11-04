@@ -134,3 +134,18 @@ def test_api_install_endpoint(client):
     )
     assert res_unsafe.status_code == 400
     assert "error" in res_unsafe.get_json()
+
+
+def test_health_endpoints(client):
+    """Test /health, /api/health, and /api/v1/health endpoints."""
+    for path in ["/health", "/api/health", "/api/v1/health"]:
+        res = client.get(path)
+        assert res.status_code == 200
+        data = res.get_json()
+        assert data["status"] == "healthy"
+        assert data["service"] == "appztore-backend"
+        assert "version" in data
+        assert "timestamp" in data
+        assert "cache_entries" in data
+        assert "platform" in data
+
