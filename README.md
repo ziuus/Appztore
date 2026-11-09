@@ -7,6 +7,10 @@
 [![License](https://img.shields.io/github/license/ziuus/Appztore?color=blue)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-informational)](https://github.com/ziuus/Appztore/releases)
 
+> Building this in the open — if it saves you time, a star helps others find it.
+> Found a bug, or have an idea? [Open an issue](https://github.com/ziuus/Appztore/issues).
+> New package-source drivers and registry ideas welcome.
+
 ---
 
 ## Overview
