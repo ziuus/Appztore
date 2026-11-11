@@ -41,7 +41,7 @@ export default function App() {
   const [aiModel, setAiModel] = useState<string | null>(() => {
     return localStorage.getItem("appztore_ai_model");
   });
-  const [plan, setPlan] = useState<Plan>(() => {
+  const [plan] = useState<Plan>(() => {
     return (localStorage.getItem("appztore_plan") as Plan) || "free";
   });
   const [showDeveloperApps, setShowDeveloperApps] = useState<boolean>(true);
